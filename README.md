@@ -41,10 +41,20 @@
 # 1. 构建产物（lib/ 已随仓库提交时，本步可跳过）
 pnpm install
 pnpm run build
+# ⚠️ 构建用的是 devDependencies，装完必须剪掉：
+pnpm install --prod
 
 # 2. 在 profile 里登记为本地依赖（link 指向本仓库）
 #    $DSH_HOME 默认为 ~\.dsh
 ```
+
+> ⚠️ **`pnpm install --prod` 这一步不能省。** 插件以 `link:` 方式运行时，解析用的就是本仓库的
+> `node_modules`。完整安装会把 `@deepseek-ai/*` 这些 **peerDependency 的一份副本**放进插件目录，
+> 它们在运行时**优先于宿主提供的同名包**被解析到 —— 也就是同一进程里出现两份 `cordis` / `pi-ai`。
+> 上游 `src/pi-ai-guard.ts` 专门为这个双实例问题写了检测，可见它是真实故障源。
+>
+> 剪成生产依赖后，插件目录里只剩自己该带的 `@earendil-works/pi-ai`，其余交给宿主解析，
+> 与 npm 发布包安装出来的形态一致。
 
 编辑 `$DSH_HOME\profiles\desktop\package.json`：
 
