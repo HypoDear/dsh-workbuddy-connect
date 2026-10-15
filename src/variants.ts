@@ -66,6 +66,26 @@ export interface WorkBuddyVariant {
   statusPath: string
   /** Same-origin probe-control route consumed by this variant's card. */
   probePath: string
+  /**
+   * OAuth `platform` parameter for this product's sign-in endpoints.
+   *
+   * Equals {@link id} by construction, but named separately because the two
+   * mean different things: `id` is this plugin's own provider key, while this
+   * value is what the upstream authorization server expects. The server also
+   * echoes `workbuddy` for *both* products inside the `authUrl` it hands back,
+   * which is the bug {@link normalizeAuthUrl} exists to correct.
+   */
+  platform: string
+  /**
+   * Basename of the plaintext sign-in document this plugin's `login` command
+   * writes, under `$DSH_HOME/workbuddy-auth/`.
+   *
+   * Deliberately *not* the plugin-owned copy (`ownFilename`): that one is the
+   * harness's private refresh cache, whereas this is the operator-facing file
+   * that `WORKBUDDY_AUTH_FILE` / `WORKBUDDY_AI_AUTH_FILE` point at, so a
+   * successful sign-in works without editing the plugin.
+   */
+  signinFilename: string
 }
 
 /**
@@ -130,6 +150,8 @@ export const WORKBUDDY_VARIANTS: readonly WorkBuddyVariant[] = [
     visibilityFilename: '.workbuddy-model-visibility.json',
     statusPath: WORKBUDDY_STATUS_PATH,
     probePath: WORKBUDDY_PROBE_PATH,
+    platform: 'workbuddy',
+    signinFilename: 'workbuddy-cn.json',
   },
   {
     id: 'workbuddy-ai',
@@ -160,6 +182,8 @@ export const WORKBUDDY_VARIANTS: readonly WorkBuddyVariant[] = [
     visibilityFilename: '.workbuddy-ai-model-visibility.json',
     statusPath: WORKBUDDY_AI_STATUS_PATH,
     probePath: WORKBUDDY_AI_PROBE_PATH,
+    platform: 'workbuddy-ai',
+    signinFilename: 'workbuddy-ai.json',
   },
 ]
 

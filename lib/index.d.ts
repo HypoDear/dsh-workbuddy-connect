@@ -416,6 +416,21 @@ type WorkBuddyChatResult = {
   message: string;
 };
 /**
+ * Endpoint bases, exported so the sign-in/check-in half (`oauth.ts`) reads the
+ * same literals this client does instead of carrying a second copy. The CN
+ * product splits chat and billing across two hosts; the international one
+ * serves both from its single host.
+ */
+declare const CN_CHAT_BASE = "https://copilot.tencent.com";
+declare const CN_BILLING_BASE = "https://www.codebuddy.cn";
+declare const GLOBAL_BASE = "https://www.workbuddy.ai";
+/**
+ * Shared CLI-form User-Agent for refresh and the CN catalog; chat and probe
+ * present the desktop identity (client-identity.ts). Exported so the sign-in
+ * half presents the same client string to the same endpoints.
+ */
+declare const CLIENT_UA = "CLI/2.63.2 CodeBuddy/2.63.2";
+/**
  * Reduce an upstream credits string to its language-neutral display form.
  *
  * The host LLM seam carries this text to the browser, and the host has no
@@ -726,6 +741,26 @@ interface WorkBuddyVariant {
   statusPath: string;
   /** Same-origin probe-control route consumed by this variant's card. */
   probePath: string;
+  /**
+   * OAuth `platform` parameter for this product's sign-in endpoints.
+   *
+   * Equals {@link id} by construction, but named separately because the two
+   * mean different things: `id` is this plugin's own provider key, while this
+   * value is what the upstream authorization server expects. The server also
+   * echoes `workbuddy` for *both* products inside the `authUrl` it hands back,
+   * which is the bug {@link normalizeAuthUrl} exists to correct.
+   */
+  platform: string;
+  /**
+   * Basename of the plaintext sign-in document this plugin's `login` command
+   * writes, under `$DSH_HOME/workbuddy-auth/`.
+   *
+   * Deliberately *not* the plugin-owned copy (`ownFilename`): that one is the
+   * harness's private refresh cache, whereas this is the operator-facing file
+   * that `WORKBUDDY_AUTH_FILE` / `WORKBUDDY_AI_AUTH_FILE` point at, so a
+   * successful sign-in works without editing the plugin.
+   */
+  signinFilename: string;
 }
 /**
  * How one product's Electron key helper is identified on each platform, and
@@ -1587,6 +1622,220 @@ declare class WorkBuddyProbeService {
   probe(modelId: string, manualConsent?: boolean): Promise<WorkBuddyProbeStatus>;
 }
 //#endregion
+//#region src/signin.d.ts
+/** Sign-in endpoints. */
+interface WorkBuddySigninEndpoints {
+  /** Host serving the OAuth handshake and account lookup. */
+  base: string;
+  /** Host serving billing, including check-in. */
+  billingBase: string;
+  /** `Origin`/`Referer` presented on every request. */
+  origin: string;
+}
+/** Envelope shape of every upstream JSON answer. */
+interface UpstreamEnvelope {
+  status: number;
+  ok: boolean;
+  code?: number;
+  msg?: string;
+  data?: Record<string, unknown>;
+  document: Record<string, unknown>;
+  nonJson?: true;
+}
+/**
+ * Endpoint set for one variant.
+ *
+ * The CN product splits its hosts: chat lives on `copilot.tencent.com` while
+ * billing — and therefore `Origin`/`Referer` — is `www.codebuddy.cn`, which is
+ * why the two cannot be collapsed into one constant. The international product
+ * serves everything from its single host.
+ */
+declare function signinEndpointsFor(variant: WorkBuddyVariant): WorkBuddySigninEndpoints;
+/** Absolute path of the plaintext sign-in document for one variant. */
+declare function signinPathFor(variant: WorkBuddyVariant): string;
+/** Identity fields the billing headers need. */
+interface SigninCredentialView {
+  accessToken: string;
+  uid?: string;
+  enterpriseId?: string;
+  domain: string;
+}
+/** A pending authorization, as the gateway issued it. */
+interface WorkBuddyAuthorizationRequest {
+  state: string;
+  /** The URL to open, already corrected. */
+  authUrl: string;
+  /** Corrections applied to the gateway's URL, for display. */
+  notes: readonly string[];
+}
+/**
+ * Repair the `authUrl` the gateway hands back.
+ *
+ * Two defects are measurable, and both produce a page that blames the operator
+ * rather than the link:
+ *
+ * 1. **`platform` is always `workbuddy`**, even for the international product,
+ *    which lands the operator on the wrong product's sign-in page.
+ * 2. **`state` (and `version`) may be missing**, without which the page reports
+ *    an incomplete sign-in link.
+ */
+declare function normalizeAuthUrl(rawUrl: string, variant: Pick<WorkBuddyVariant, 'platform'>, state: string): {
+  url: string;
+  notes: string[];
+};
+/** Begin an authorization: allocate a `state` and get the URL to open. */
+declare function startAuthorization(variant: WorkBuddyVariant, endpoints?: WorkBuddySigninEndpoints): Promise<WorkBuddyAuthorizationRequest>;
+/**
+ * Open a URL in the operator's browser.
+ *
+ * On Windows this must go through `rundll32`, never `cmd /c start`: `cmd`
+ * treats `&` as a command separator, so an authorization URL — which always
+ * carries several query parameters — would be truncated at the first `&` and
+ * the page would report an incomplete link.
+ */
+declare function openInBrowser(url: string): boolean;
+/** Tokens as the gateway issued them, normalized to epoch milliseconds. */
+interface WorkBuddyIssuedTokens {
+  accessToken: string;
+  refreshToken: string;
+  expiresAtMs?: number;
+  refreshExpiresAtMs?: number;
+  /** Domain exactly as the upstream reported it (may be absent). */
+  domain?: string;
+}
+/**
+ * Poll for the token.
+ *
+ * `11217` is the gateway's documented "still waiting" code; any other
+ * non-zero code is reported once so a genuine failure is visible instead of
+ * hiding behind the progress line.
+ */
+declare function pollAuthorization(variant: WorkBuddyVariant, state: string, options?: {
+  timeoutMs?: number;
+  endpoints?: WorkBuddySigninEndpoints;
+  onTick?: (secondsLeft: number, note?: string) => void;
+}): Promise<WorkBuddyIssuedTokens>;
+/** Account identity, when the gateway can supply it. */
+interface WorkBuddyAccount {
+  uid?: string;
+  nickname?: string;
+  enterpriseId?: string;
+}
+/**
+ * Fetch the account record.
+ *
+ * Failing here is not fatal: a credential without a uid still authenticates,
+ * it only loses the per-account features keyed by uid.
+ */
+declare function fetchAccount(variant: WorkBuddyVariant, state: string, accessToken: string, options?: {
+  timeoutMs?: number;
+  endpoints?: WorkBuddySigninEndpoints;
+}): Promise<WorkBuddyAccount>;
+/**
+ * The `domain` to persist for a freshly issued credential.
+ *
+ * Derived through the same {@link regionOf} rule the credential store uses, so
+ * the written document can never disagree with how the store will read it. The
+ * international product is forced: the gateway has been observed echoing a
+ * non-`workbuddy.ai` domain, and copying that through would make the store
+ * classify an international credential as CN and refuse to load it with
+ * `credential-region-mismatch`.
+ */
+declare function resolveIssuedDomain(variant: WorkBuddyVariant, issued: string | undefined): string;
+/** The plaintext document shape {@link parseWorkBuddyAuth} accepts. */
+interface WorkBuddySigninDocument {
+  auth: {
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: number;
+    refreshExpiresAt?: number;
+    domain: string;
+  };
+  account: WorkBuddyAccount;
+}
+/** Build the on-disk document from issued tokens plus identity. */
+declare function buildSigninDocument(input: {
+  tokens: WorkBuddyIssuedTokens;
+  account: WorkBuddyAccount;
+  domain: string;
+}): WorkBuddySigninDocument;
+/**
+ * Write a plaintext sign-in document.
+ *
+ * `0600`/`0700` are requested rather than assumed, and the parent directory is
+ * created with the same intent. The file is written even on platforms that do
+ * not honour POSIX modes on Windows, because the directory is still outside any
+ * repository and the operator is told where it went.
+ */
+declare function writeSigninDocument(path: string, document: WorkBuddySigninDocument): Promise<void>;
+/** One attempted endpoint and its outcome. */
+interface WorkBuddyCheckinAttempt {
+  url: string;
+  status?: number;
+  code?: number;
+  msg?: string;
+  error?: string;
+}
+/** Check-in state as far as the upstream reports it. */
+interface WorkBuddyCheckinStatus {
+  /** `undefined` when the upstream did not say. */
+  checkedToday?: boolean;
+  streakDays?: number;
+  raw: UpstreamEnvelope;
+  attempts: readonly WorkBuddyCheckinAttempt[];
+}
+/**
+ * Query check-in state.
+ *
+ * A 404 means the path spelling is wrong and the next candidate is tried; any
+ * other answer — including a rejection — is authoritative, because retrying a
+ * different spelling after a 403 would only generate more rejected requests.
+ */
+declare function queryCheckinStatus(variant: WorkBuddyVariant, credential: SigninCredentialView, endpoints?: WorkBuddySigninEndpoints): Promise<WorkBuddyCheckinStatus>;
+/** How to read a claim attempt. */
+type WorkBuddyClaimOutcome =
+/** The reward was granted by this call. */
+{
+  state: 'claimed';
+  credits?: number;
+} |
+/** Already claimed today; the endpoint is idempotent. */
+{
+  state: 'already';
+} |
+/** This product has no check-in activity at all. */
+{
+  state: 'no-activity';
+} |
+/** Rejected by device risk control (401/403). */
+{
+  state: 'blocked';
+  status: number;
+} |
+/** Anything else, with the upstream's own wording. */
+{
+  state: 'failed';
+  status: number;
+  code?: number;
+  message?: string;
+} |
+/** The request never completed. */
+{
+  state: 'unreachable';
+  error: string;
+};
+/**
+ * Claim the daily reward.
+ *
+ * The two products answer with the **same** `code` 10001 but different
+ * meanings, so the message text is the only signal that separates "already
+ * claimed today" (CN, normal) from "no check-in activity" (international, also
+ * normal). `checkedToday === false` from the preceding status query is the
+ * corroborating evidence: if the status just said "not yet", a failure cannot
+ * have been "already claimed".
+ */
+declare function claimDailyCheckin(variant: WorkBuddyVariant, credential: SigninCredentialView, status: WorkBuddyCheckinStatus, endpoints?: WorkBuddySigninEndpoints): Promise<WorkBuddyClaimOutcome>;
+//#endregion
 //#region src/host-heartbeat.d.ts
 /**
  * Host-side heartbeat: a small JSON file written under `$DSH_HOME` once the
@@ -1725,4 +1974,4 @@ declare function visibilityAccountOf(credential: Pick<WorkBuddyCredential, 'uid'
  */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { AI_VARIANT, type AppVersionInfo, CN_APP_VERSION_FILENAME, CN_VARIANT, type ChatIdentity, Config, FALLBACK_CN_APP_VERSION, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, type ResolveChatIdentityOptions, type UpstreamErrorKind, WORKBUDDY_AI_SETTINGS_NS, WORKBUDDY_APP_VERSION_FILENAME, WORKBUDDY_AUTH_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_CATALOG_FILENAME, WORKBUDDY_HOST_HEARTBEAT_FILENAME, WORKBUDDY_PROBE_FILENAME, WORKBUDDY_PROVIDER, WORKBUDDY_SETTINGS_NS, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WORKBUDDY_VARIANTS, WORKBUDDY_VISIBILITY_FILENAME, type WorkBuddyAdapter, type WorkBuddyAppVersionSource, type WorkBuddyAuthStatus, WorkBuddyCatalog, type WorkBuddyCatalogFetch, WorkBuddyCatalogStore, type WorkBuddyChatResult, type WorkBuddyCredential, WorkBuddyCredentialStore, type WorkBuddyCredits, type WorkBuddyEffort, type WorkBuddyHostHeartbeat, type WorkBuddyModelBilling, type WorkBuddyModelInfo, type WorkBuddyModelReasoning, type WorkBuddyProbeRecord, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyProbeValidation, type WorkBuddyPromotion, type WorkBuddyRefreshOutcome, type WorkBuddyShim, WorkBuddyUpstreamClient, type WorkBuddyUpstreamModel, type WorkBuddyVariant, WorkBuddyVisibilityStore, appUserAgent, apply, chatUserAgent, classifyUpstreamError, clearHostHeartbeat, createWorkBuddyAdapter, createWorkBuddyShim, defaultDesktopAuthCandidates, defaultDesktopAuthPath, desktopAuthCandidatesFor, fallbackChatIdentity, fingerprintModel, inject, installedAppVersion, isHeartbeatProcessAlive, modelWithCurrentPromotion, name, normalizeCredits, parseModelCatalog, parseWorkBuddyAuth, prepareChatBody, prepareCnChatBody, prepareInternationalChatBody, probeModel, processStartTimeMs, randomSentinel, readBundleVersion, readCliVersion, readHostHeartbeat, regionOf, resolveAppVersion, resolveChatIdentity, validAppVersion, validCliVersion, variantFor, visibilityAccountOf, workbuddyCatalogPath, workbuddyHostHeartbeatPath, workbuddyOwnAuthPath, workbuddyProbePath, workbuddyVisibilityPath };
+export { AI_VARIANT, type AppVersionInfo, CLIENT_UA, CN_APP_VERSION_FILENAME, CN_BILLING_BASE, CN_CHAT_BASE, CN_VARIANT, type ChatIdentity, Config, FALLBACK_CN_APP_VERSION, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, GLOBAL_BASE, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, type ResolveChatIdentityOptions, type UpstreamErrorKind, WORKBUDDY_AI_SETTINGS_NS, WORKBUDDY_APP_VERSION_FILENAME, WORKBUDDY_AUTH_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_CATALOG_FILENAME, WORKBUDDY_HOST_HEARTBEAT_FILENAME, WORKBUDDY_PROBE_FILENAME, WORKBUDDY_PROVIDER, WORKBUDDY_SETTINGS_NS, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WORKBUDDY_VARIANTS, WORKBUDDY_VISIBILITY_FILENAME, type WorkBuddyAccount, type WorkBuddyAdapter, type WorkBuddyAppVersionSource, type WorkBuddyAuthStatus, type WorkBuddyAuthorizationRequest, WorkBuddyCatalog, type WorkBuddyCatalogFetch, WorkBuddyCatalogStore, type WorkBuddyChatResult, type WorkBuddyCheckinAttempt, type WorkBuddyCheckinStatus, type WorkBuddyClaimOutcome, type WorkBuddyCredential, WorkBuddyCredentialStore, type WorkBuddyCredits, type WorkBuddyEffort, type WorkBuddyHostHeartbeat, type WorkBuddyIssuedTokens, type WorkBuddyModelBilling, type WorkBuddyModelInfo, type WorkBuddyModelReasoning, type WorkBuddyProbeRecord, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyProbeValidation, type WorkBuddyPromotion, type WorkBuddyRefreshOutcome, type WorkBuddyShim, type WorkBuddySigninDocument, type WorkBuddySigninEndpoints, WorkBuddyUpstreamClient, type WorkBuddyUpstreamModel, type WorkBuddyVariant, WorkBuddyVisibilityStore, appUserAgent, apply, buildSigninDocument, chatUserAgent, claimDailyCheckin, classifyUpstreamError, clearHostHeartbeat, createWorkBuddyAdapter, createWorkBuddyShim, defaultDesktopAuthCandidates, defaultDesktopAuthPath, desktopAuthCandidatesFor, fallbackChatIdentity, fetchAccount, fingerprintModel, inject, installedAppVersion, isHeartbeatProcessAlive, modelWithCurrentPromotion, name, normalizeAuthUrl, normalizeCredits, openInBrowser, parseModelCatalog, parseWorkBuddyAuth, pollAuthorization, prepareChatBody, prepareCnChatBody, prepareInternationalChatBody, probeModel, processStartTimeMs, queryCheckinStatus, randomSentinel, readBundleVersion, readCliVersion, readHostHeartbeat, regionOf, resolveAppVersion, resolveChatIdentity, resolveIssuedDomain, signinEndpointsFor, signinPathFor, startAuthorization, validAppVersion, validCliVersion, variantFor, visibilityAccountOf, workbuddyCatalogPath, workbuddyHostHeartbeatPath, workbuddyOwnAuthPath, workbuddyProbePath, workbuddyVisibilityPath, writeSigninDocument };

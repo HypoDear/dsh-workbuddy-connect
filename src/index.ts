@@ -114,7 +114,11 @@ export {
   type WorkBuddyCredential,
 } from './auth.ts'
 export {
+  CLIENT_UA,
+  CN_BILLING_BASE,
+  CN_CHAT_BASE,
   classifyUpstreamError,
+  GLOBAL_BASE,
   modelWithCurrentPromotion,
   normalizeCredits,
   parseModelCatalog,
@@ -134,6 +138,28 @@ export {
   type WorkBuddyRefreshOutcome,
   type WorkBuddyUpstreamModel,
 } from './upstream.ts'
+export {
+  buildSigninDocument,
+  claimDailyCheckin,
+  fetchAccount,
+  normalizeAuthUrl,
+  openInBrowser,
+  pollAuthorization,
+  queryCheckinStatus,
+  resolveIssuedDomain,
+  signinEndpointsFor,
+  signinPathFor,
+  startAuthorization,
+  writeSigninDocument,
+  type WorkBuddyAccount,
+  type WorkBuddyAuthorizationRequest,
+  type WorkBuddyCheckinAttempt,
+  type WorkBuddyCheckinStatus,
+  type WorkBuddyClaimOutcome,
+  type WorkBuddyIssuedTokens,
+  type WorkBuddySigninDocument,
+  type WorkBuddySigninEndpoints,
+} from './signin.ts'
 export {
   WORKBUDDY_HOST_HEARTBEAT_FILENAME,
   clearHostHeartbeat,

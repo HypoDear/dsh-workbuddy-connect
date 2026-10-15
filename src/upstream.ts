@@ -192,9 +192,15 @@ export type WorkBuddyChatResult =
   | { ok: true; response: Response }
   | { ok: false; status: number; kind: UpstreamErrorKind; message: string }
 
-const CN_CHAT_BASE = 'https://copilot.tencent.com'
-const CN_BILLING_BASE = 'https://www.codebuddy.cn'
-const GLOBAL_BASE = 'https://www.workbuddy.ai'
+/**
+ * Endpoint bases, exported so the sign-in/check-in half (`oauth.ts`) reads the
+ * same literals this client does instead of carrying a second copy. The CN
+ * product splits chat and billing across two hosts; the international one
+ * serves both from its single host.
+ */
+export const CN_CHAT_BASE = 'https://copilot.tencent.com'
+export const CN_BILLING_BASE = 'https://www.codebuddy.cn'
+export const GLOBAL_BASE = 'https://www.workbuddy.ai'
 
 /**
  * Display name for the single synthetic row the enterprise endpoint produces.
@@ -227,8 +233,12 @@ function describeShape(document: unknown): string {
   return `${top}; data { ${at(data as Record<string, unknown>)} }`
 }
 
-/** Shared CLI-form User-Agent for refresh and the CN catalog; chat and probe present the desktop identity (client-identity.ts). */
-const CLIENT_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
+/**
+ * Shared CLI-form User-Agent for refresh and the CN catalog; chat and probe
+ * present the desktop identity (client-identity.ts). Exported so the sign-in
+ * half presents the same client string to the same endpoints.
+ */
+export const CLIENT_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
 const JSON_TIMEOUT_MS = 30_000
 const ERROR_BODY_LIMIT = 4096
 
