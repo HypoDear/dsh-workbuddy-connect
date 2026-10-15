@@ -78,6 +78,14 @@ pnpm install --prod
 >
 > 剪成生产依赖后，插件目录里只剩自己该带的 `@earendil-works/pi-ai`，其余交给宿主解析，
 > 与 npm 发布包安装出来的形态一致。
+>
+> **那命令行为什么还能跑？** `lib/bin.js`（`login` / `checkin` / `status` / `doctor` / `logout`）
+> 是**独立进程**，拿不到宿主提供的包 —— 直接跑会 `ERR_MODULE_NOT_FOUND`。所以构建时把它
+> 依赖图里真正需要的两个宿主工具包（`dsh-home-paths`、`dsh-atomic-write`）**内联**进这一份产物，
+> 见 `tsdown.config.ts` 的 `alwaysBundle`。这两者都不是 cordis 服务、也不持有 pi-ai 实例，
+> 内联不会产生双实例问题（`dsh-atomic-write` 的锁是文件系统约定，同版本的另一份副本
+> 与宿主那份互斥行为一致）；而 `lib/index.js`（宿主加载的那份）依旧把 `@deepseek-ai/*`
+> 全部留在外部。两份产物**刻意不共享 chunk**，否则共享块会把内联副本拖进宿主那份。
 
 编辑 `$DSH_HOME\profiles\desktop\package.json`：
 
