@@ -1,8 +1,7 @@
 /**
  * WorkBuddy (CodeBuddy / copilot.tencent.com) upstream client: chat streaming,
- * token refresh, model catalog, and credit balance. The wire behavior is
- * ported from Sliverkiss/workbuddy2api (MIT), whose Go implementation is
- * battle-tested against the real endpoint.
+ * token refresh, model catalog, and credit balance. The wire behavior below was
+ * established by observing the real endpoint.
  *
  * @module dsh-workbuddy-connect/upstream
  */
