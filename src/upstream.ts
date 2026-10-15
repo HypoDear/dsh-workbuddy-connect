@@ -9,8 +9,6 @@
 import { appUserAgent, resolveAppVersion, type AppVersionInfo } from './app-version.ts'
 import { chatUserAgent, fallbackChatIdentity, resolveChatIdentity, type ChatIdentity } from './client-identity.ts'
 import type { WorkBuddyCredential } from './auth.ts'
-import type { ProbeAttempt } from './probe.ts'
-import { PROBE_MAX_TOKENS, PROBE_PROMPT } from './probe.ts'
 
 /** WorkBuddy region selected by the credential's login domain. */
 export type WorkBuddyRegion = 'cn' | 'global'
@@ -1121,84 +1119,6 @@ export class WorkBuddyUpstreamClient {
       ...resetTime === undefined ? {} : { cycleResetTime: resetTime },
     }
   }
-
-
-  /**
-   * One probe request: a real streaming chat call carrying the effort under
-   * test.
-   *
-   * Shares `chatHeaders` with the normal chat path on purpose — the plan
-   * forbids probing through anything but the plugin's own credential handling,
-   * so a result describes what a real message would experience.
-   *
-   * The caller aborts as soon as a parseable event arrives; the body is never
-   * assembled into an answer. `reasoning_effort` is omitted entirely (rather
-   * than sent empty) when `effort` is undefined, so the baseline case is a
-   * genuinely bare request.
-   *
-   * Two international differences, both measured on 2026-09-11:
-   *
-   * - The gateway requires a leading `system` message (400/11128 otherwise), so
-   *   one is prepended for the global region only.
-   * - `max_tokens: 1` is below some models' floor (the GPT-5.6 family rejects it
-   *   with 400/11133 `integer_below_min_value`), so the international probe asks
-   *   for a slightly larger minimum. This is a floor the plugin must clear, not
-   *   evidence about any model's effort support: a model still refusing that
-   *   minimum is reported as an incompatible request, never as "effort
-   *   unsupported", and the ceiling is never raised further to force an answer.
-   */
-  async probeEffort(
-    credential: WorkBuddyCredential,
-    model: string,
-    effort: string | undefined,
-    signal: AbortSignal,
-  ): Promise<ProbeAttempt> {
-    const international = regionOf(credential.domain) === 'global'
-    // Same identity rule as the chat path — chat and its probe sibling must
-    // never present two different clients, and a thrown resolver degrades to
-    // the desktop fallback form exactly as in `chatStream`.
-    let identity: ChatIdentity
-    let userAgent: string
-    try {
-      identity = await this.resolveChatIdentity(international ? 'global' : 'cn')
-      userAgent = chatUserAgent(identity, international ? 'global' : 'cn')
-    } catch {
-      identity = fallbackChatIdentity(international ? 'global' : 'cn')
-      userAgent = chatUserAgent(identity, international ? 'global' : 'cn')
-    }
-    const payload: Record<string, unknown> = {
-      model,
-      stream: true,
-      messages: [
-        ...international ? [{ role: 'system', content: INTERNATIONAL_SYSTEM_PROMPT }] : [],
-        { role: 'user', content: PROBE_PROMPT },
-      ],
-      max_tokens: international ? INTERNATIONAL_PROBE_MAX_TOKENS : PROBE_MAX_TOKENS,
-    }
-    if (effort !== undefined) payload['reasoning_effort'] = effort
-
-    let response: Response
-    try {
-      response = await fetch(`${chatBase(credential)}/v2/chat/completions`, {
-        method: 'POST',
-        headers: { ...chatHeaders(credential, userAgent, identity.clientVersion), 'Authorization': `Bearer ${credential.accessToken}` },
-        body: JSON.stringify(payload),
-        signal,
-      })
-    } catch (error: unknown) {
-      return { status: 0, streamed: false, detail: `transport error: ${String(error)}` }
-    }
-
-    if (!response.ok) {
-      const text = (await response.text()).slice(0, ERROR_BODY_LIMIT)
-      return { status: response.status, streamed: false, ...errorCodeOf(text) }
-    }
-
-    // Read until the first parseable event, then hang up: the probe wants the
-    // acceptance signal, not a completion.
-    const streamed = await readFirstEvent(response)
-    return { status: response.status, streamed }
-  }
 }
 
 /** Pull `extError.code` out of an upstream error body, if it is shaped that way. */
@@ -1543,12 +1463,3 @@ function dropUnsupportedEffort(obj: Record<string, unknown>): void {
  * prompt, so this only covers a caller that omitted one.
  */
 const INTERNATIONAL_SYSTEM_PROMPT = 'You are a helpful assistant.'
-
-/**
- * Output ceiling for an international probe request.
- *
- * Above the smallest value that the strictest observed model accepts (the
- * GPT-5.6 family rejects `1` with 11133), while still being far too small to
- * produce a real answer. See {@link WorkBuddyUpstreamClient.probeEffort}.
- */
-const INTERNATIONAL_PROBE_MAX_TOKENS = 16

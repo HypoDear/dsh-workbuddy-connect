@@ -1,5 +1,5 @@
 import z from "@deepseek-ai/schemastery";
-import "@earendil-works/pi-ai";
+import { ThinkingLevelMap } from "@earendil-works/pi-ai";
 import { PiAiAdapter, PiAiAdapterOptions } from "@deepseek-ai/dsh-llm-pi-ai";
 import { Context } from "@deepseek-ai/cordis";
 import { SettingsNamespace } from "@deepseek-ai/dsh-settings";
@@ -184,68 +184,6 @@ declare function resolveChatIdentity(region: WorkBuddyRegion, options?: ResolveC
  * bundle, or a missing cache all present this, never the legacy CLI UA.
  */
 declare function fallbackChatIdentity(region: WorkBuddyRegion): ChatIdentity;
-//#endregion
-//#region src/probe.d.ts
-/**
- * The canonical values a probe tests, in a fixed order.
- *
- * `minimal` is absent: it appears in no upstream vocabulary. `off` is absent
- * by policy — disabling thinking is a separate capability the upstream must
- * declare through `canDisableThinking`, never something probing may infer.
- */
-declare const PROBE_EFFORT_CANDIDATES: readonly WorkBuddyEffort[];
-/** Sentinel generator; injectable so tests get deterministic values. */
-type SentinelFactory = () => string;
-/** Default sentinel: unmistakably non-canonical, different on every call. */
-declare function randomSentinel(): string;
-/**
- * One response as the probe sees it, split into the only distinctions the
- * attribution rule needs.
- */
-interface ProbeAttempt {
-  /** HTTP status, or 0 for a transport failure. */
-  status: number;
-  /** True when a parseable SSE event arrived. */
-  streamed: boolean;
-  /** `extError.code` from a JSON error body, when present. */
-  errorCode?: string;
-  /** Free-form detail for logs; never shown as a capability claim. */
-  detail?: string;
-}
-/** How one attempt is performed; the caller owns credentials and HTTP. */
-type ProbeSender = (effort: string | undefined, signal: AbortSignal) => Promise<ProbeAttempt>;
-/** The outcome of probing one model. */
-type ProbeOutcome = {
-  validation: 'validating';
-  efforts: readonly WorkBuddyEffort[];
-  requests: number;
-} | {
-  validation: 'non-validating';
-  efforts: readonly [];
-  requests: number;
-} | {
-  validation: 'unknown';
-  efforts: readonly [];
-  requests: number;
-  reason: string;
-};
-/** Which endpoint's rejection vocabulary a probe interprets. */
-type ProbeRegion = 'cn' | 'global';
-/**
- * Probe one model.
- *
- * `options.candidates` exists so tests can shorten the sweep; production always
- * uses {@link PROBE_EFFORT_CANDIDATES}. `options.region` selects which
- * endpoint's rejection vocabulary is read; it defaults to `cn`, which is also
- * the production default for the China app.
- */
-declare function probeModel(options: {
-  send: ProbeSender;
-  sentinel?: SentinelFactory;
-  candidates?: readonly WorkBuddyEffort[];
-  timeoutMs?: number;
-  region?: ProbeRegion;
-}): Promise<ProbeOutcome>;
 //#endregion
 //#region src/upstream.d.ts
 /** WorkBuddy region selected by the credential's login domain. */
@@ -583,31 +521,6 @@ declare class WorkBuddyUpstreamClient {
    * response body may describe the account's usage.
    */
   private fetchEnterpriseCredits;
-  /**
-   * One probe request: a real streaming chat call carrying the effort under
-   * test.
-   *
-   * Shares `chatHeaders` with the normal chat path on purpose — the plan
-   * forbids probing through anything but the plugin's own credential handling,
-   * so a result describes what a real message would experience.
-   *
-   * The caller aborts as soon as a parseable event arrives; the body is never
-   * assembled into an answer. `reasoning_effort` is omitted entirely (rather
-   * than sent empty) when `effort` is undefined, so the baseline case is a
-   * genuinely bare request.
-   *
-   * Two international differences, both measured on 2026-09-11:
-   *
-   * - The gateway requires a leading `system` message (400/11128 otherwise), so
-   *   one is prepended for the global region only.
-   * - `max_tokens: 1` is below some models' floor (the GPT-5.6 family rejects it
-   *   with 400/11133 `integer_below_min_value`), so the international probe asks
-   *   for a slightly larger minimum. This is a floor the plugin must clear, not
-   *   evidence about any model's effort support: a model still refusing that
-   *   minimum is reported as an incompatible request, never as "effort
-   *   unsupported", and the ceiling is never raised further to force an answer.
-   */
-  probeEffort(credential: WorkBuddyCredential, model: string, effort: string | undefined, signal: AbortSignal): Promise<ProbeAttempt>;
 }
 /**
  * Parse either response shape after its envelope has been checked.
@@ -718,8 +631,6 @@ interface WorkBuddyVariant {
   desktopFilename: string;
   /** Basename of the plugin-owned credential copy under `$DSH_HOME`. */
   ownFilename: string;
-  /** Basename of the plugin-owned probe-record file under `$DSH_HOME`. */
-  probeFilename: string;
   /**
    * Basename of the plugin-owned saved-catalog file under `$DSH_HOME`.
    *
@@ -1229,118 +1140,6 @@ declare class WorkBuddyCatalog {
   fallback(): readonly WorkBuddyModelInfo[];
 }
 //#endregion
-//#region src/probe-store.d.ts
-/** Basename of the probe record inside the Harness home. */
-declare const WORKBUDDY_PROBE_FILENAME = ".workbuddy-probe.json";
-/**
- * Whether the model's effort parameter is actually validated.
- *
- * - `validating`: the upstream rejected an unknown sentinel value, so a
- *   per-level answer is meaningful.
- * - `non-validating`: the upstream accepted the sentinel, so it ignores or
- *   loosely coerces the parameter and no per-level answer can be trusted.
- * - `unknown`: baseline or sentinel failed for an unrelated reason (auth,
- *   rate limit, transport, ambiguous error body). Not a negative claim.
- */
-type WorkBuddyProbeValidation = 'validating' | 'non-validating' | 'unknown';
-/** One model's recorded observation. */
-interface WorkBuddyProbeRecord {
-  /** Fingerprint of the catalog row this observation was made against. */
-  fingerprint: string;
-  validation: WorkBuddyProbeValidation;
-  /** Efforts verified as accepted; only ever non-empty for `validating`. */
-  efforts: readonly WorkBuddyEffort[];
-  /** When the probe ran, epoch milliseconds. */
-  probedAtMs: number;
-  /** Plugin version that produced the record. */
-  pluginVersion: string;
-  /**
-   * The account this observation was made under, as `uid:enterpriseId`.
-   *
-   * An effort set is a fact about one account's entitlement as much as about
-   * the model: the same model id can accept different levels under a different
-   * subscription. Records are stored under this identity and only ever served
-   * back to it, so one account never inherits another's detected levels — and
-   * because the store nests by this identity, switching back finds this
-   * account's own records intact rather than re-probing from scratch.
-   */
-  account: string;
-}
-/**
- * Plugin-owned probe record path inside the Harness home.
- *
- * One file per variant. Same-named models exist on both endpoints (the
- * international catalog repeats `glm-5.3`, `glm-5.2`, `hy3`, `kimi-k2.6`), and
- * {@link fingerprintModel} covers only `id`/`reasoning`/`supportsImages` —
- * never the provider — so a single shared file would let one variant's
- * observation answer for the other. The paths differ; the format does not.
- */
-declare function workbuddyProbePath(filename?: string): string;
-/**
- * Fingerprint the catalog fields a probe depends on.
- *
- * Deliberately excludes display-only fields (`name`, `billing`, `contextWindow`)
- * so a rename or a promo badge does not throw away a valid observation, and
- * deliberately includes the whole reasoning object so any change to the
- * declared shape re-probes.
- */
-declare function fingerprintModel(info: WorkBuddyModelInfo): string;
-/** Options for {@link WorkBuddyProbeStore}. */
-interface WorkBuddyProbeStoreOptions {
-  /** Explicit state-file path, overriding the `$DSH_HOME` default. */
-  path?: string;
-  /** Observation lifetime; defaults to 14 days. */
-  ttlMs?: number;
-  /** Plugin version stamped into new records. */
-  pluginVersion: string;
-  /** Clock injection for tests. */
-  now?: () => number;
-}
-/**
- * The plugin's probe records: read once, written atomically, keyed by the
- * account that produced each observation, and never trusted across a
- * fingerprint change or past the TTL.
- */
-declare class WorkBuddyProbeStore {
-  private readonly path;
-  private readonly ttlMs;
-  private readonly pluginVersion;
-  private readonly now;
-  private records;
-  constructor(options: WorkBuddyProbeStoreOptions | string);
-  /** Resolved state-file path, for the CLI and tests. */
-  filePath(): string;
-  private load;
-  /**
-   * The usable record for one account and model, or `undefined` when there is
-   * none, it is expired, it was taken against a different catalog row, or it
-   * belongs to a different account.
-   *
-   * @param account - the account in effect, as `uid:enterpriseId`. Records are
-   *   only returned for the account that produced them.
-   */
-  get(modelId: string, fingerprint: string, account: string): WorkBuddyProbeRecord | undefined;
-  /**
-   * Store one observation under the account stamped on it. Only a decisive
-   * answer (`validating` / `non-validating`) replaces an existing decisive
-   * record *of the same account*: a transient `unknown` must not erase
-   * knowledge the user already paid for.
-   */
-  set(modelId: string, record: WorkBuddyProbeRecord): void;
-  /** Drop every record of every account; used by the card's explicit "clear" action. */
-  clear(): void;
-  /** Every record currently held, grouped by account, for status display. */
-  all(): Readonly<Record<string, Readonly<Record<string, WorkBuddyProbeRecord>>>>;
-  /** Build a record stamped with this store's clock, version, and account. */
-  record(fingerprint: string, validation: WorkBuddyProbeValidation, efforts: readonly WorkBuddyEffort[], account: string): WorkBuddyProbeRecord;
-  /**
-   * Write through a temporary file and rename, so a crash mid-write cannot
-   * leave a half-parsed document that reads as "no records" and silently drops
-   * every observation.
-   */
-  private persist;
-}
-//#endregion
 //#region src/shim.d.ts
 /** Minimal logger surface the plugin context already provides. */
 interface ShimLogger {
@@ -1385,12 +1184,6 @@ declare const WORKBUDDY_STREAM_IDLE_TIMEOUT_MS = 300000;
 interface WorkBuddyAdapterOptions {
   providerId?: string;
   displayName?: string;
-  /**
-   * Which endpoint this adapter serves, from the variant descriptor. Decides
-   * only whether the CN `onlyReasoning` veto hides `off`; defaults to
-   * `'cn'`, the same legacy default `providerId` carries.
-   */
-  region?: WorkBuddyRegion;
   shim: WorkBuddyShim;
   store: WorkBuddyCredentialStore;
   catalog: WorkBuddyCatalog;
@@ -1398,11 +1191,6 @@ interface WorkBuddyAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined;
   /** Resolve one image's path in the current model-tool execution world. */
   resolveImageAccess?: NonNullable<PiAiAdapterOptions['resolveImageAccess']>;
-  /**
-   * Look up a local probe observation for a model. Consulted only for rows the
-   * upstream left undeclared; absent means declared-set-only behavior.
-   */
-  observe?: (modelId: string) => WorkBuddyProbeRecord | undefined;
   /**
    * Model ids the current account has hidden from the picker, resolved per
    * read so an account switch is honored without rebuilding the adapter.
@@ -1421,6 +1209,51 @@ interface WorkBuddyAdapter {
   /** Rebuild the adapter's provider snapshot; call after a catalog update. */
   invalidate: () => void;
 }
+/**
+ * The single reasoning effort every reasoning model is pinned to.
+ *
+ * This build carries **one** effort instead of the upstream's per-model set.
+ * The catalog declares `supportedEfforts` per model and the plugin used to
+ * mirror it, falling back to a local *probe* for rows that declared nothing;
+ * both halves are gone here, so the discovery surface no longer exists and
+ * every reasoning model is sent this one value.
+ *
+ * `high` is the only value present in *every* declared set across both
+ * catalogs measured on this machine (WorkBuddy 7/7, WorkBuddy AI 15/15), which
+ * makes it the safest single choice for a model that states a set. Rows that
+ * declare nothing now receive it as well — a deliberate widening, since those
+ * rows previously got no `reasoning_effort` at all.
+ *
+ * Changing this constant moves every reasoning model to a different level; the
+ * mapping below needs no other edit. Prefer a value the catalog actually
+ * offers, or the endpoint will reject the request.
+ */
+declare const FIXED_REASONING_EFFORT: WorkBuddyEffort;
+/**
+ * Resolve a WorkBuddy model's reasoning capability into pi-ai's
+ * `thinkingLevelMap` (every level pinned to its wire spelling or `null` for
+ * unsupported), mirroring `dsh-llm-pi-ai`'s own `resolveModelReasoning`.
+ *
+ * Only two outcomes exist: a model that reasons offers exactly
+ * {@link FIXED_REASONING_EFFORT} and nothing else, and a model that does not
+ * reason offers no control at all (pi-ai reads a falsy `reasoning` as "off
+ * only", and no `reasoning_effort` reaches the wire).
+ *
+ * `off` is never offered. The CN endpoint vetoes it outright on models that
+ * declare `onlyReasoning`: that catalog ships `onlyReasoning` and
+ * `canDisableThinking` both true on models such as `deepseek-v4.1-flash`,
+ * which cannot both hold, and the endpoint sides with `onlyReasoning`,
+ * answering HTTP 400 (「模型不支持该思考强度」). Pinning one effort removes the
+ * contradiction without needing a per-region rule.
+ *
+ * The offered level describes what the upstream *accepts*, never what it
+ * *does*: acceptance proves the spelling was not rejected, not that it changes
+ * the model's behaviour.
+ */
+declare function reasoningFields(info: WorkBuddyModelInfo): {
+  reasoning: boolean;
+  thinkingLevelMap?: ThinkingLevelMap;
+};
 /**
  * Assemble the adapter. The provider's `getModels` reads the live catalog,
  * and every model's `baseUrl` is re-resolved per read so the shim's
@@ -1550,76 +1383,6 @@ declare class WorkBuddyVisibilityStore {
    */
   setVisible(account: string, model: string, visible: boolean): void;
   private persist;
-}
-//#endregion
-//#region src/probe-service.d.ts
-/** What the caller learns about a completed probe. */
-type WorkBuddyProbeStatus = {
-  state: 'ok';
-  validation: WorkBuddyProbeRecord['validation'];
-  efforts: readonly string[];
-  requests: number;
-} | {
-  state: 'unavailable';
-  reason: string;
-};
-/** Options for {@link WorkBuddyProbeService}. */
-interface WorkBuddyProbeServiceOptions {
-  store: WorkBuddyProbeStore;
-  catalog: WorkBuddyCatalog;
-  credentials: WorkBuddyCredentialStore;
-  client: WorkBuddyUpstreamClient;
-  /** Whether probing is permitted at all; consulted before every sweep. */
-  consent: () => boolean;
-  /**
-   * The account currently in effect, as `uid:enterpriseId`, or `undefined`
-   * while signed out.
-   *
-   * Records are read and written against this identity, and it is re-checked
-   * after the sweep finishes: an observation produced under account A must not
-   * be stored once account B is in effect, however long the probe took. The
-   * store's per-account keying alone cannot catch that, because an in-flight
-   * probe completes *after* the switch has already happened.
-   */
-  account: () => string | undefined;
-  sentinel?: SentinelFactory;
-  /**
-   * Which endpoint's rejection vocabulary sweeps read. The two apps talk to
-   * different upstreams that answer a bad effort with different codes, so each
-   * runtime passes its own region instead of sharing one widening set.
-   */
-  region: ProbeRegion;
-  /** Injectable for tests; defaults to the live upstream sender. */
-  send?: (modelId: string) => ProbeSender;
-}
-/**
- * Serial probe runner. One instance is shared by the manual API and any
- * future automatic trigger, so the two can never overlap.
- */
-declare class WorkBuddyProbeService {
-  private readonly options;
-  private queue;
-  private readonly pending;
-  private running;
-  constructor(options: WorkBuddyProbeServiceOptions);
-  /** Whether a sweep is in flight right now. */
-  isRunning(): boolean;
-  /**
-   * The record the adapter may use for this model, or `undefined`.
-   *
-   * Applies the plan's precedence (§5): a declared set always wins, so a model
-   * that declares `supportedEfforts` is never answered from an observation.
-   */
-  recordFor(modelId: string): WorkBuddyProbeRecord | undefined;
-  /**
-   * Probe one model, serially.
-   *
-   * The authenticated manual route supplies one-request consent after UI
-   * confirmation. Other callers must pass the configured consent gate.
-   * Manual consent never changes the automatic-probing configuration.
-   * Explicit requests bypass historical results, but share an ongoing run.
-   */
-  probe(modelId: string, manualConsent?: boolean): Promise<WorkBuddyProbeStatus>;
 }
 //#endregion
 //#region src/signin.d.ts
@@ -1940,12 +1703,6 @@ interface Config {
   authFile?: string;
   /** Explicit WorkBuddy AI (international) desktop auth-file path, overriding env and platform defaults. */
   authFileAI?: string;
-  /**
-   * Whether the user has authorized sending probe requests about reasoning
-   * efforts. Off by default: a probe spends real credit, so nothing is sent
-   * until the user explicitly agrees.
-   */
-  probeConsent?: boolean;
   /** Use the largest context window the international catalog explicitly offers. */
   useMaximumContextWindow?: boolean;
 }
@@ -1974,4 +1731,4 @@ declare function visibilityAccountOf(credential: Pick<WorkBuddyCredential, 'uid'
  */
 declare function apply(ctx: Context, config: Config): void;
 //#endregion
-export { AI_VARIANT, type AppVersionInfo, CLIENT_UA, CN_APP_VERSION_FILENAME, CN_BILLING_BASE, CN_CHAT_BASE, CN_VARIANT, type ChatIdentity, Config, FALLBACK_CN_APP_VERSION, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, GLOBAL_BASE, PROBE_EFFORT_CANDIDATES, type ProbeAttempt, type ProbeOutcome, type ProbeSender, type ResolveChatIdentityOptions, type UpstreamErrorKind, WORKBUDDY_AI_SETTINGS_NS, WORKBUDDY_APP_VERSION_FILENAME, WORKBUDDY_AUTH_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_CATALOG_FILENAME, WORKBUDDY_HOST_HEARTBEAT_FILENAME, WORKBUDDY_PROBE_FILENAME, WORKBUDDY_PROVIDER, WORKBUDDY_SETTINGS_NS, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WORKBUDDY_VARIANTS, WORKBUDDY_VISIBILITY_FILENAME, type WorkBuddyAccount, type WorkBuddyAdapter, type WorkBuddyAppVersionSource, type WorkBuddyAuthStatus, type WorkBuddyAuthorizationRequest, WorkBuddyCatalog, type WorkBuddyCatalogFetch, WorkBuddyCatalogStore, type WorkBuddyChatResult, type WorkBuddyCheckinAttempt, type WorkBuddyCheckinStatus, type WorkBuddyClaimOutcome, type WorkBuddyCredential, WorkBuddyCredentialStore, type WorkBuddyCredits, type WorkBuddyEffort, type WorkBuddyHostHeartbeat, type WorkBuddyIssuedTokens, type WorkBuddyModelBilling, type WorkBuddyModelInfo, type WorkBuddyModelReasoning, type WorkBuddyProbeRecord, WorkBuddyProbeService, type WorkBuddyProbeStatus, WorkBuddyProbeStore, type WorkBuddyProbeValidation, type WorkBuddyPromotion, type WorkBuddyRefreshOutcome, type WorkBuddyShim, type WorkBuddySigninDocument, type WorkBuddySigninEndpoints, WorkBuddyUpstreamClient, type WorkBuddyUpstreamModel, type WorkBuddyVariant, WorkBuddyVisibilityStore, appUserAgent, apply, buildSigninDocument, chatUserAgent, claimDailyCheckin, classifyUpstreamError, clearHostHeartbeat, createWorkBuddyAdapter, createWorkBuddyShim, defaultDesktopAuthCandidates, defaultDesktopAuthPath, desktopAuthCandidatesFor, fallbackChatIdentity, fetchAccount, fingerprintModel, inject, installedAppVersion, isHeartbeatProcessAlive, modelWithCurrentPromotion, name, normalizeAuthUrl, normalizeCredits, openInBrowser, parseModelCatalog, parseWorkBuddyAuth, pollAuthorization, prepareChatBody, prepareCnChatBody, prepareInternationalChatBody, probeModel, processStartTimeMs, queryCheckinStatus, randomSentinel, readBundleVersion, readCliVersion, readHostHeartbeat, regionOf, resolveAppVersion, resolveChatIdentity, resolveIssuedDomain, signinEndpointsFor, signinPathFor, startAuthorization, validAppVersion, validCliVersion, variantFor, visibilityAccountOf, workbuddyCatalogPath, workbuddyHostHeartbeatPath, workbuddyOwnAuthPath, workbuddyProbePath, workbuddyVisibilityPath, writeSigninDocument };
+export { AI_VARIANT, type AppVersionInfo, CLIENT_UA, CN_APP_VERSION_FILENAME, CN_BILLING_BASE, CN_CHAT_BASE, CN_VARIANT, type ChatIdentity, Config, FALLBACK_CN_APP_VERSION, FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, FIXED_REASONING_EFFORT, GLOBAL_BASE, type ResolveChatIdentityOptions, type UpstreamErrorKind, WORKBUDDY_AI_SETTINGS_NS, WORKBUDDY_APP_VERSION_FILENAME, WORKBUDDY_AUTH_FILENAME, WORKBUDDY_AUTH_FILE_ENV, WORKBUDDY_CATALOG_FILENAME, WORKBUDDY_HOST_HEARTBEAT_FILENAME, WORKBUDDY_PROVIDER, WORKBUDDY_SETTINGS_NS, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, WORKBUDDY_VARIANTS, WORKBUDDY_VISIBILITY_FILENAME, type WorkBuddyAccount, type WorkBuddyAdapter, type WorkBuddyAppVersionSource, type WorkBuddyAuthStatus, type WorkBuddyAuthorizationRequest, WorkBuddyCatalog, type WorkBuddyCatalogFetch, WorkBuddyCatalogStore, type WorkBuddyChatResult, type WorkBuddyCheckinAttempt, type WorkBuddyCheckinStatus, type WorkBuddyClaimOutcome, type WorkBuddyCredential, WorkBuddyCredentialStore, type WorkBuddyCredits, type WorkBuddyEffort, type WorkBuddyHostHeartbeat, type WorkBuddyIssuedTokens, type WorkBuddyModelBilling, type WorkBuddyModelInfo, type WorkBuddyModelReasoning, type WorkBuddyPromotion, type WorkBuddyRefreshOutcome, type WorkBuddyShim, type WorkBuddySigninDocument, type WorkBuddySigninEndpoints, WorkBuddyUpstreamClient, type WorkBuddyUpstreamModel, type WorkBuddyVariant, WorkBuddyVisibilityStore, appUserAgent, apply, buildSigninDocument, chatUserAgent, claimDailyCheckin, classifyUpstreamError, clearHostHeartbeat, createWorkBuddyAdapter, createWorkBuddyShim, defaultDesktopAuthCandidates, defaultDesktopAuthPath, desktopAuthCandidatesFor, fallbackChatIdentity, fetchAccount, inject, installedAppVersion, isHeartbeatProcessAlive, modelWithCurrentPromotion, name, normalizeAuthUrl, normalizeCredits, openInBrowser, parseModelCatalog, parseWorkBuddyAuth, pollAuthorization, prepareChatBody, prepareCnChatBody, prepareInternationalChatBody, processStartTimeMs, queryCheckinStatus, readBundleVersion, readCliVersion, readHostHeartbeat, reasoningFields, regionOf, resolveAppVersion, resolveChatIdentity, resolveIssuedDomain, signinEndpointsFor, signinPathFor, startAuthorization, validAppVersion, validCliVersion, variantFor, visibilityAccountOf, workbuddyCatalogPath, workbuddyHostHeartbeatPath, workbuddyOwnAuthPath, workbuddyVisibilityPath, writeSigninDocument };

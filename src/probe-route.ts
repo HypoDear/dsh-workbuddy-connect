@@ -1,22 +1,25 @@
 /**
- * Probe control route: the only state-changing endpoint the plugin exposes.
+ * The plugin's control route: the only state-changing endpoint it exposes.
  *
- * Two guards, because they stop different things (see `docs/reasoning-effort-probe-plan.md`
- * §6.4 and the v0.3.1 note in AGENTS.md about their exact scope):
+ * It carries every write the browser half needs — re-reading the credential and
+ * catalog, the international context-window preference, and per-account model
+ * visibility. The module name, exported symbols and wire path keep their
+ * historical `probe` spelling: they are also the mount point and the
+ * request-header contract, so renaming them would be a silent protocol break
+ * for no behavioural gain.
+ *
+ * Two guards, because they stop different things:
  *
  * 1. **Loopback Host + Origin**, shared with the status route. This drops
  *    DNS-rebinding pages, whose requests arrive addressed to the attacker's
  *    domain.
  * 2. **An in-process random key**, minted per process and handed only to the
  *    same-origin card. Loopback alone is *not* authentication — any local
- *    process can write `Host: 127.0.0.1` — so a route that spends the user's
- *    credit must prove the caller was told the key.
+ *    process can write `Host: 127.0.0.1` — so a route that changes persisted
+ *    state must prove the caller was told the key.
  *
- * A probe request is never accepted with a prompt, a model id outside the
- * live catalog, or a sentinel from the browser: it is assembled entirely
- * host-side. (Scope: the `probe` action only — `set-model-visibility`
- * deliberately accepts a model id the current catalog no longer lists, since
- * a hidden id is kept for when the model returns.)
+ * `set-model-visibility` deliberately accepts a model id the current catalog no
+ * longer lists, since a hidden id is kept for when the model returns.
  *
  * @module dsh-workbuddy-connect/probe-route
  */
@@ -35,19 +38,12 @@ const MAX_BODY_BYTES = 4096
 /** Constructor dependencies. */
 export interface WorkBuddyProbeRouteOptions {
   /**
-   * Run a probe for one model. Resolves to a short status string, never a raw
-   * upstream body.
-   */
-  probe: (modelId: string) => Promise<{ state: string; reason?: string }>
-  /** Drop every recorded observation. */
-  clear: () => void
-  /**
    * Re-read the credential and re-fetch the model catalog for this variant.
    *
    * It lives on this route rather than the status GET because it is a write
    * that spends a request against the upstream: the read-only status route's
    * loopback guard protects against a rebinding *page*, which is not the same
-   * as authorizing an action. Requires the same in-process key as `probe`.
+   * as authorizing an action.
    */
   refresh?: () => Promise<{ state: string; reason?: string }>
   /** Persist and apply the international context-window preference. */
@@ -113,7 +109,6 @@ function parseAction(text: string): WorkBuddyProbeAction | undefined {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
   const wrapped = parsed as Record<string, unknown>
   const action = wrapped['action']
-  if (action === 'clear') return { action: 'clear' }
   // No payload: the variant is already known from the route the request arrived
   // on, so the browser cannot ask this route to refresh a different provider.
   if (action === 'refresh') return { action: 'refresh' }
@@ -132,11 +127,6 @@ function parseAction(text: string): WorkBuddyProbeAction | undefined {
     if (typeof wrapped['visible'] !== 'boolean') return undefined
     if (typeof account !== 'string' || account === '') return undefined
     return { action: 'set-model-visibility', model: model.trim(), visible: wrapped['visible'], account }
-  }
-  if (action === 'probe') {
-    const model = wrapped['model']
-    if (typeof model !== 'string' || model.trim() === '') return undefined
-    return { action: 'probe', model: model.trim() }
   }
   return undefined
 }
@@ -173,11 +163,6 @@ export function workBuddyProbeHandler(
       return
     }
     try {
-      if (action.action === 'clear') {
-        deps.clear()
-        json(res, 200, { state: 'cleared' })
-        return
-      }
       if (action.action === 'refresh') {
         if (deps.refresh === undefined) {
           json(res, 404, { error: 'refresh-not-supported' })
@@ -206,7 +191,10 @@ export function workBuddyProbeHandler(
         ))
         return
       }
-      json(res, 200, await deps.probe(action.model as string))
+      // `parseAction` yields only the three handled actions, so this is
+      // unreachable in practice; answering 400 keeps the contract explicit
+      // rather than silently succeeding on an action nothing performed.
+      json(res, 400, { error: 'unsupported action' })
     } catch (error: unknown) {
       json(res, 500, { error: error instanceof Error ? error.message : String(error) })
     }

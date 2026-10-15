@@ -6,7 +6,7 @@
  *
  * The two variants are assembled by the same factory and differ only in their
  * {@link WorkBuddyVariant} descriptor: each gets its own credential store,
- * catalog, upstream client, shim, adapter, probe state, and routes. Neither
+ * catalog, upstream client, shim, adapter, and routes. Neither
  * variant's startup, catalog fetch, or credential state can stop the other from
  * registering — a user with only one app installed sees only that group.
  *
@@ -25,20 +25,18 @@ import { workbuddyCatalogPath, WorkBuddyCatalogStore } from './catalog-store.ts'
 import { WorkBuddyVisibilityStore, workbuddyVisibilityPath } from './visibility-store.ts'
 import { createWorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
-import { WorkBuddyProbeService } from './probe-service.ts'
-import { newestFirst, WorkBuddyProbeStore, workbuddyProbePath } from './probe-store.ts'
 import { WorkBuddyUpstreamClient } from './upstream.ts'
 import { piAiVersionWarning } from './pi-ai-guard.ts'
 import { registerWorkBuddyStatusRoute } from './web-status.ts'
 import { createProbeKey, registerWorkBuddyProbeRoute } from './probe-route.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
-import type { WorkBuddyWebCatalog, WorkBuddyWebProbeSection } from './status-paths.ts'
+import type { WorkBuddyWebCatalog } from './status-paths.ts'
 import { clearHostHeartbeat, writeHostHeartbeat } from './host-heartbeat.ts'
 import { WORKBUDDY_CONNECT_VERSION } from './version.ts'
 import { legacySettingsOf } from './legacy-settings.ts'
 import { CN_VARIANT, WORKBUDDY_VARIANTS, type WorkBuddyVariant } from './variants.ts'
 
-export { WORKBUDDY_PROVIDER, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, createWorkBuddyAdapter, type WorkBuddyAdapter } from './adapter.ts'
+export { WORKBUDDY_PROVIDER, WORKBUDDY_STREAM_IDLE_TIMEOUT_MS, createWorkBuddyAdapter, FIXED_REASONING_EFFORT, reasoningFields, type WorkBuddyAdapter } from './adapter.ts'
 export { createWorkBuddyShim, type WorkBuddyShim } from './shim.ts'
 export {
   FALLBACK_WORKBUDDY_AI_MODELS,
@@ -56,23 +54,6 @@ export {
   WorkBuddyVisibilityStore,
   workbuddyVisibilityPath,
 } from './visibility-store.ts'
-export {
-  fingerprintModel,
-  WorkBuddyProbeStore,
-  workbuddyProbePath,
-  WORKBUDDY_PROBE_FILENAME,
-  type WorkBuddyProbeRecord,
-  type WorkBuddyProbeValidation,
-} from './probe-store.ts'
-export {
-  PROBE_EFFORT_CANDIDATES,
-  randomSentinel,
-  probeModel,
-  type ProbeAttempt,
-  type ProbeOutcome,
-  type ProbeSender,
-} from './probe.ts'
-export { WorkBuddyProbeService, type WorkBuddyProbeStatus } from './probe-service.ts'
 export {
   AI_VARIANT,
   CN_VARIANT,
@@ -211,7 +192,7 @@ export const WORKBUDDY_AI_SETTINGS_NS = 'workbuddy-ai' as SettingsNamespace
  * A startup-only catalog fetch cannot notice a sign-in that happens while DSH
  * is already running, so the model group would not appear until a restart. This
  * poll is a cheap existence/parse read of at most a few local files: it never
- * contacts the network and never runs a reasoning probe.
+ * contacts the network.
  *
  * `DSH_WORKBUDDY_POLL_MS` overrides it. That exists so the sweep can be
  * exercised end to end in tests and shortened while diagnosing a slow sign-in
@@ -254,12 +235,6 @@ export interface Config {
   authFile?: string
   /** Explicit WorkBuddy AI (international) desktop auth-file path, overriding env and platform defaults. */
   authFileAI?: string
-  /**
-   * Whether the user has authorized sending probe requests about reasoning
-   * efforts. Off by default: a probe spends real credit, so nothing is sent
-   * until the user explicitly agrees.
-   */
-  probeConsent?: boolean
   /** Use the largest context window the international catalog explicitly offers. */
   useMaximumContextWindow?: boolean
 }
@@ -268,16 +243,12 @@ export interface Config {
 const AUTH_FILE_FIELD = z.string().description('WorkBuddy desktop auth file (defaults to the app\'s own location)')
 /** Explicit international desktop auth-file path (shared by the plugin schema and its section). */
 const AUTH_FILE_AI_FIELD = z.string().description('WorkBuddy AI desktop auth file (defaults to the app\'s own location)')
-/** Probe authorization (shared by the plugin schema and the CN section). */
-const PROBE_CONSENT_FIELD = z.boolean().default(false)
-  .description('Authorize reasoning-effort probes (each probe sends real requests that may consume credit)')
 const MAXIMUM_CONTEXT_WINDOW_FIELD = z.boolean().default(true)
   .description('Use the largest context window declared by WorkBuddy AI when alternatives are available (on by default)')
 
 export const Config: z<Config> = z.object({
   authFile: AUTH_FILE_FIELD,
   authFileAI: AUTH_FILE_AI_FIELD,
-  probeConsent: PROBE_CONSENT_FIELD,
   useMaximumContextWindow: MAXIMUM_CONTEXT_WINDOW_FIELD,
 })
 
@@ -286,13 +257,9 @@ export const Config: z<Config> = z.object({
  *
  * The section's namespace is what serves these fields to `settings.yaml` and
  * the TUI `/settings`, and it keeps them apart from the international side's.
- * `probeConsent` lives here because it predates the second variant; it gates no
- * current code path (only manual, per-click-confirmed probes run), so it is left
- * where existing users set it rather than moved and re-asked.
  */
 const CN_SECTION: z<Config> = z.object({
   authFile: AUTH_FILE_FIELD,
-  probeConsent: PROBE_CONSENT_FIELD,
 })
 
 /** The international card's settings section and its context-window preference. */
@@ -307,8 +274,6 @@ interface VariantRuntime {
   store: WorkBuddyCredentialStore
   client: WorkBuddyUpstreamClient
   catalog: WorkBuddyCatalog
-  probeStore: WorkBuddyProbeStore
-  probeService: WorkBuddyProbeService
   /**
    * The last catalogs that loaded, keyed by account.
    *
@@ -372,7 +337,7 @@ interface CatalogFetch {
   promise: Promise<void>
 }
 
-/** Stable identity key used by credentials, probe records, and catalog entries. */
+/** Stable identity key used by credentials and catalog entries. */
 function credentialIdentity(credential: Pick<WorkBuddyCredential, 'uid' | 'enterpriseId'>): string {
   return `${credential.uid}:${credential.enterpriseId ?? ''}`
 }
@@ -408,7 +373,7 @@ function fallbackFor(variant: WorkBuddyVariant): readonly WorkBuddyModelInfo[] {
   return variant.id === CN_VARIANT.id ? FALLBACK_WORKBUDDY_MODELS : FALLBACK_WORKBUDDY_AI_MODELS
 }
 
-/** Build one variant's stores and probe state. */
+/** Build one variant's stores. */
 function createVariantRuntime(
   config: Config,
   variant: WorkBuddyVariant,
@@ -434,40 +399,20 @@ function createVariantRuntime(
   // treats "never seen, still signed out" as no change — which is only correct
   // if the pre-adoption state is already hidden.
   catalog.setVisible(false)
-  const probeStore = new WorkBuddyProbeStore({
-    pluginVersion: WORKBUDDY_CONNECT_VERSION,
-    path: workbuddyProbePath(variant.probeFilename),
-  })
-  // One file per variant, for the same reason the probe records are split: the
-  // two endpoints disagree about rates and windows for shared model ids, so a
-  // saved CN roster must never be served as an international one.
+  // One file per variant: the two endpoints disagree about rates and windows
+  // for shared model ids, so a saved CN roster must never be served as an
+  // international one.
   const savedCatalogs = new WorkBuddyCatalogStore(
     workbuddyCatalogPath(variant.catalogFilename),
   )
   const visibilityStore = new WorkBuddyVisibilityStore(
     workbuddyVisibilityPath(variant.visibilityFilename),
   )
-  const probeService = new WorkBuddyProbeService({
-    store: probeStore,
-    catalog,
-    credentials: store,
-    client,
-    // The two endpoints answer a rejected effort with different codes; each
-    // runtime reads only the vocabulary measured on its own endpoint.
-    region: variant.id === CN_VARIANT.id ? 'cn' : 'global',
-    consent: () => current().probeConsent === true,
-    // Observations are per account: the service reads and writes its records
-    // against this identity, so one account's detected levels never answer for
-    // another's, and an in-flight sweep cannot store under a new account.
-    account: () => identityOf(variant.id),
-  })
   return {
     variant,
     store,
     client,
     catalog,
-    probeStore,
-    probeService,
     savedCatalogs,
     visibilityStore,
     account: () => accountOf(variant.id),
@@ -500,52 +445,6 @@ function catalogSection(runtime: VariantRuntime): WorkBuddyWebCatalog {
 }
 
 /**
- * Whether a model can be probed by hand: it reasons and the upstream declares
- * no effort set for it.
- *
- * Deliberately *not* filtered by whether a result already exists. Dropping a
- * model once it has been detected made the list shrink with use, so
- * re-detecting one model — after an upstream change, say — meant clearing every
- * other result first. The list stays stable and the card marks which entries
- * already have an answer.
- */
-function isProbeCandidate(info: WorkBuddyModelInfo): boolean {
-  if (info.reasoning?.supports !== true) return false
-  return (info.reasoning.supportedEfforts?.length ?? 0) === 0
-}
-
-/** Compact probe state for one card: consent, candidates, observations. */
-function probeSection(runtime: VariantRuntime, consent: boolean): WorkBuddyWebProbeSection {
-  const models = runtime.catalog.current()
-  // Read results through the *same* judgement the adapter uses, rather than
-  // straight from the store. A raw record can be stale in ways the adapter
-  // already discounts — its catalog row changed, it aged past the TTL, or the
-  // upstream has since declared an effort set (which always wins) — and showing
-  // one would have the card promise levels the model picker does not offer. A
-  // model the upstream dropped leaves the catalog entirely, so it drops out
-  // here too.
-  const results = models.flatMap(info => {
-    const record = runtime.probeService.recordFor(info.id)
-    if (record === undefined) return []
-    return [{
-      id: info.id,
-      name: info.name,
-      validation: record.validation,
-      efforts: record.efforts,
-      probedAt: record.probedAtMs,
-    }]
-  })
-  return {
-    consent,
-    running: runtime.probeService.isRunning(),
-    candidates: models.filter(isProbeCandidate).map(info => info.id),
-    // Newest first: a detection the user just ran belongs at the top, not
-    // appended below every earlier one.
-    results: newestFirst(results),
-  }
-}
-
-/**
  * Start one variant: its loopback endpoint, provider registration, and
  * configuration-card wiring.
  *
@@ -556,7 +455,7 @@ function probeSection(runtime: VariantRuntime, consent: boolean): WorkBuddyWebPr
  * @returns whether the provider registered.
  */
 async function startVariant(ctx: Context, runtime: VariantRuntime): Promise<boolean> {
-  const { variant, store, client, catalog, probeService } = runtime
+  const { variant, store, client, catalog } = runtime
   const shim = createWorkBuddyShim({ store, client, catalog, logger: ctx.logger })
   try {
     await shim.ready
@@ -571,10 +470,6 @@ async function startVariant(ctx: Context, runtime: VariantRuntime): Promise<bool
     const workbuddy = createWorkBuddyAdapter({
       providerId: variant.id,
       displayName: variant.displayName,
-      // From the variant descriptor, never inferred: it selects the CN-only
-      // `onlyReasoning` rule that keeps an always-failing `off` out of the
-      // picker.
-      region: variant.region,
       shim,
       store,
       catalog,
@@ -584,9 +479,7 @@ async function startVariant(ctx: Context, runtime: VariantRuntime): Promise<bool
         hostPath => ctx.get('fs')?.processPathFromHostPath(hostPath),
         ref,
       ),
-      observe: modelId => probeService.recordFor(modelId),
-      // Hidden ids resolve per read from the store by the *current* account:
-      // an account switch or a toggle changes the answer after the next
+      // Hidden ids resolve per read from the store by the *current* account:      // an account switch or a toggle changes the answer after the next
       // invalidate, and a signed-out or uid-less variant hides nothing.
       hidden: () => {
         const account = runtime.account()
@@ -650,8 +543,8 @@ export function apply(ctx: Context, config: Config): void {
   if (piAiWarning !== undefined) ctx.logger.warn(`dsh-workbuddy-connect: ${piAiWarning}`)
 
   // Live configuration source: starts as the applied config and is replaced by
-  // the settings section's source once one is installed, so edits reach the
-  // probe consent gate without a restart.
+  // the settings section's source once one is installed, so edits take effect
+  // without a restart.
   let current = (): Config => config
 
   /** Timers and in-flight work belonging to this plugin instance. */
@@ -712,15 +605,14 @@ export function apply(ctx: Context, config: Config): void {
    * transition bumps {@link VariantRuntime.catalogGeneration}, which is what
    * makes an in-flight request from before the change refuse to write back.
    *
-   * Probe observations are kept across an account change: the store nests them
-   * per account, so the departing account's records simply stop being served
-   * (every read is account-scoped) and are found intact if that account
-   * returns. The "signed out, then in as someone else" sequence that used to
-   * look like a first sighting is still safe — a record only ever answers for
-   * the account stamped on it, so the new account inherits nothing. Visibility
-   * preferences are kept for the same reason, and read through the new
-   * account's key immediately: the picker re-lists after the invalidate below
-   * and a returning account finds its own hidden list back in force.
+   * Visibility preferences are kept across an account change: the store nests
+   * them per account, so the departing account's list simply stops being served
+   * (every read is account-scoped) and is found intact if that account returns.
+   * The "signed out, then in as someone else" sequence that used to look like a
+   * first sighting is still safe — a list only ever answers for the account
+   * stamped on it, so the new account inherits nothing. The new account's key is
+   * read immediately: the picker re-lists after the invalidate below and a
+   * returning account finds its own hidden list back in force.
    *
    * @param identity - the account now in effect, or `undefined` when signed out.
    * @param account - the visibility key for that same credential (`undefined`
@@ -737,8 +629,8 @@ export function apply(ctx: Context, config: Config): void {
     if (account === undefined) lastAccounts.delete(id)
     else lastAccounts.set(id, account)
     // Any change of identity invalidates in-flight work and the catalog it was
-    // serving; recorded probe answers stay on disk, keyed by account and
-    // re-judged on every read.
+    // serving; account-keyed preferences stay on disk and are re-read on every
+    // access.
     runtime.catalogGeneration += 1
     runtime.inflightFetch?.controller.abort()
     runtime.inflightFetch = undefined
@@ -789,7 +681,6 @@ export function apply(ctx: Context, config: Config): void {
         client: runtime.client,
         models: () => runtime.catalog.current(),
         catalog: () => catalogSection(runtime),
-        probe: () => probeSection(runtime, current().probeConsent === true),
         probeKey,
         // The full per-account hidden list — stale ids included — so the card's
         // checkboxes answer exactly what the picker filter reads. Absent (and
@@ -812,13 +703,6 @@ export function apply(ctx: Context, config: Config): void {
       })
       registerWorkBuddyProbeRoute(webCtx, {
         path: runtime.variant.probePath,
-        probe: async modelId => {
-          // The authenticated manual endpoint is called only after per-model confirmation.
-          const result = await runtime.probeService.probe(modelId, true)
-          if (result.state === 'ok') runtime.invalidate()
-          return result
-        },
-        clear: () => { runtime.probeStore.clear(); runtime.invalidate() },
         refresh: async () => {
           if (stopped) return { state: 'failed', reason: 'plugin is stopping' }
           // Re-read the credential first: the user pressed this because the list
@@ -938,7 +822,6 @@ export function apply(ctx: Context, config: Config): void {
     /** Merge both sections into the whole config the rest of the plugin reads. */
     const merged = (): Config => ({
       ...sources.cn().authFile === undefined ? {} : { authFile: sources.cn().authFile },
-      ...sources.cn().probeConsent === undefined ? {} : { probeConsent: sources.cn().probeConsent },
       ...sources.ai().authFileAI === undefined ? {} : { authFileAI: sources.ai().authFileAI },
       ...sources.ai().useMaximumContextWindow === undefined ? {} : { useMaximumContextWindow: sources.ai().useMaximumContextWindow },
     })
@@ -1081,8 +964,8 @@ export function apply(ctx: Context, config: Config): void {
    *
    * - **none → some** (first sighting): reveal the group and fetch a catalog.
    * - **none → some, identity changed**: additionally drop the previous
-   *   account's observations, so another user's probe answers cannot be read as
-   *   the new account's.
+   *   account's cached state, so another user's data cannot be read as the new
+   *   account's.
    * - **some → none**: hide the group and stop serving its models.
    * - **same identity**: nothing to do — the store refreshes tokens on demand,
    *   and re-fetching on every rotation would hit the catalog endpoint for no

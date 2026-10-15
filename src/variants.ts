@@ -43,8 +43,6 @@ export interface WorkBuddyVariant {
   desktopFilename: string
   /** Basename of the plugin-owned credential copy under `$DSH_HOME`. */
   ownFilename: string
-  /** Basename of the plugin-owned probe-record file under `$DSH_HOME`. */
-  probeFilename: string
   /**
    * Basename of the plugin-owned saved-catalog file under `$DSH_HOME`.
    *
@@ -145,7 +143,6 @@ export const WORKBUDDY_VARIANTS: readonly WorkBuddyVariant[] = [
     },
     desktopFilename: 'workbuddy-desktop.info',
     ownFilename: '.workbuddy-auth.json',
-    probeFilename: '.workbuddy-probe.json',
     catalogFilename: '.workbuddy-catalog.json',
     visibilityFilename: '.workbuddy-model-visibility.json',
     statusPath: WORKBUDDY_STATUS_PATH,
@@ -177,7 +174,6 @@ export const WORKBUDDY_VARIANTS: readonly WorkBuddyVariant[] = [
     },
     desktopFilename: 'workbuddy-desktop-ai.info',
     ownFilename: '.workbuddy-ai-auth.json',
-    probeFilename: '.workbuddy-ai-probe.json',
     catalogFilename: '.workbuddy-ai-catalog.json',
     visibilityFilename: '.workbuddy-ai-model-visibility.json',
     statusPath: WORKBUDDY_AI_STATUS_PATH,

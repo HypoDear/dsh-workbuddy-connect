@@ -26,41 +26,19 @@ export const WORKBUDDY_AI_STATUS_PATH = '/plugins/dsh-workbuddy-connect/ai/statu
 export const WORKBUDDY_AI_PROBE_PATH = '/plugins/dsh-workbuddy-connect/ai/probe'
 
 /** One model's recorded probe observation, as the card displays it. */
-export interface WorkBuddyWebProbeModel {
-  id: string
-  name: string
-  /** `validating` results carry efforts; the other states never do. */
-  validation: 'validating' | 'non-validating' | 'unknown'
-  efforts: readonly string[]
-  probedAt: number
-}
-
-/** Probe section of the status document. */
-export interface WorkBuddyWebProbeSection {
-  /** Whether the user has authorized probing. */
-  consent: boolean
-  /** Whether a sweep is in flight right now. */
-  running: boolean
-  /** Models the user could probe by hand (undeclared yet reasoning-capable). */
-  candidates: readonly string[]
-  /** Recorded observations. */
-  results: readonly WorkBuddyWebProbeModel[]
-}
-
-/** Action requested from the probe control route. */
+/** Action requested from the control route. */
 export interface WorkBuddyProbeAction {
   /**
-   * `probe` spends credit on one model; `clear` drops recorded observations;
    * `refresh` re-reads the credential and re-fetches the model catalog;
    * `set-maximum-context-window` persists the international card preference;
    * `set-model-visibility` hides or shows one model for the signed-in
    * account's picker.
    *
-   * All five are writes, which is why they share this route's in-process key
+   * All three are writes, which is why they share this route's in-process key
    * and loopback guards rather than the read-only status GET.
    */
-  action: 'probe' | 'clear' | 'refresh' | 'set-maximum-context-window' | 'set-model-visibility'
-  /** Target model id; required for `probe` and `set-model-visibility`. */
+  action: 'refresh' | 'set-maximum-context-window' | 'set-model-visibility'
+  /** Target model id; required for `set-model-visibility`. */
   model?: string
   /** Requested value for `set-maximum-context-window` and `set-model-visibility`. */
   enabled?: boolean
@@ -278,8 +256,6 @@ export type WorkBuddyWebStatus =
     models?: readonly WorkBuddyWebModelBadge[]
     /** Where those models came from, and whether the last fetch failed. */
     catalog?: WorkBuddyWebCatalog
-    /** Reasoning-effort probe state, consent, and recorded observations. */
-    probe?: WorkBuddyWebProbeSection
     /** International-card preference selecting larger declared context windows. */
     useMaximumContextWindow?: boolean
     /** Per-account hidden-model state for the card's visibility controls. */

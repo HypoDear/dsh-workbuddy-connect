@@ -15,7 +15,7 @@ import { normalizeCredits } from './upstream.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
 import { WORKBUDDY_STATUS_PATH } from './status-paths.ts'
-import type { WorkBuddyWebCatalog, WorkBuddyWebModelBadge, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from './status-paths.ts'
+import type { WorkBuddyWebCatalog, WorkBuddyWebModelBadge, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from './status-paths.ts'
 
 export { WORKBUDDY_STATUS_PATH } from './status-paths.ts'
 export type { WorkBuddyWebStatus } from './status-paths.ts'
@@ -27,16 +27,11 @@ export interface WorkBuddyStatusRouteOptions {
   /** Resolve the current model catalog for free/badge display. */
   models: () => readonly WorkBuddyModelInfo[]
   /**
-   * Compact probe state for the card. Optional so the status route keeps
-   * working on its own in tests and headless profiles.
-   */
-  probe?: () => WorkBuddyWebProbeSection
-  /**
    * Origin of the currently served model list. Optional so the status route
    * keeps working without one in tests and headless profiles.
    */
   catalog?: () => WorkBuddyWebCatalog | undefined
-  /** In-process key authorizing probe control writes. */
+  /** In-process key authorizing control-route writes (visibility, refresh). */
   probeKey?: string
   /**
    * International-card preference selecting larger declared context windows.
@@ -176,22 +171,19 @@ export async function workBuddyWebStatus(
   const statusWithModels: WorkBuddyWebStatus = modelsField.length > 0
     ? { ...withVisibility, models: modelsField }
     : withVisibility
-  // Probe state rides the signed-in document so the card can render the
-  // consent switches and results without a second request. The control key
-  // travels with it: this response already passed the loopback guard, and the
-  // key authorizes only probe control, never credentials or completions.
-  let probed: WorkBuddyWebStatus = statusWithModels
-  if (deps.probe !== undefined) {
-    // The preference is offered only when the getter can answer a value; a
-    // host that cannot persist it answers `undefined` and the field stays out
-    // of this document, which is the card's signal not to render the control.
-    const maximumContextWindow = deps.useMaximumContextWindow?.()
-    probed = {
-      ...statusWithModels,
-      probe: deps.probe(),
-      ...deps.probeKey === undefined ? {} : { probeKey: deps.probeKey },
-      ...maximumContextWindow === undefined ? {} : { useMaximumContextWindow: maximumContextWindow },
-    }
+  // The control key and the international context-window preference ride the
+  // signed-in document. The key authorizes only control-route writes, never
+  // credentials or completions, and this response has already passed the
+  // loopback guard.
+  //
+  // The preference is offered only when the getter can answer a value; a host
+  // that cannot persist it answers `undefined` and the field stays out of this
+  // document, which is the card's signal not to render the control.
+  const maximumContextWindow = deps.useMaximumContextWindow?.()
+  const withControl: WorkBuddyWebStatus = {
+    ...statusWithModels,
+    ...deps.probeKey === undefined ? {} : { probeKey: deps.probeKey },
+    ...maximumContextWindow === undefined ? {} : { useMaximumContextWindow: maximumContextWindow },
   }
   try {
     const credential = await deps.store.current()
@@ -200,12 +192,12 @@ export async function workBuddyWebStatus(
       // `unlimited` and `cycleResetTime` ride along as-is: the card must see
       // "no cap" as its own state, and the fetch only sets them when the
       // upstream actually reported them.
-      return { ...probed, credits }
+      return { ...withControl, credits }
     }
   } catch (error: unknown) {
-    return { ...probed, creditsError: safeMessage(error) }
+    return { ...withControl, creditsError: safeMessage(error) }
   }
-  return probed
+  return withControl
 }
 
 /** The status route's request handler, extracted so tests can mount it on a bare server. */

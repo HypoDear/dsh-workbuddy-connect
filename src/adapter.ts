@@ -16,9 +16,8 @@ import type { PiAiAdapterOptions, ResolvedPiAiProviderProfile } from '@deepseek-
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import type { WorkBuddyCredentialStore } from './auth.ts'
 import type { WorkBuddyCatalog, WorkBuddyModelInfo } from './catalog.ts'
-import type { WorkBuddyProbeRecord } from './probe-store.ts'
 import type { WorkBuddyShim } from './shim.ts'
-import { normalizeCredits, type WorkBuddyRegion } from './upstream.ts'
+import { normalizeCredits, type WorkBuddyEffort } from './upstream.ts'
 
 /** Provider route this bundle owns. */
 export const WORKBUDDY_PROVIDER = 'workbuddy'
@@ -160,12 +159,6 @@ function withCatalogDisplay(name: string, info: WorkBuddyModelInfo): string {
 export interface WorkBuddyAdapterOptions {
   providerId?: string
   displayName?: string
-  /**
-   * Which endpoint this adapter serves, from the variant descriptor. Decides
-   * only whether the CN `onlyReasoning` veto hides `off`; defaults to
-   * `'cn'`, the same legacy default `providerId` carries.
-   */
-  region?: WorkBuddyRegion
   shim: WorkBuddyShim
   store: WorkBuddyCredentialStore
   catalog: WorkBuddyCatalog
@@ -173,11 +166,6 @@ export interface WorkBuddyAdapterOptions {
   resolveAttachments?: () => AttachmentStore | undefined
   /** Resolve one image's path in the current model-tool execution world. */
   resolveImageAccess?: NonNullable<PiAiAdapterOptions['resolveImageAccess']>
-  /**
-   * Look up a local probe observation for a model. Consulted only for rows the
-   * upstream left undeclared; absent means declared-set-only behavior.
-   */
-  observe?: (modelId: string) => WorkBuddyProbeRecord | undefined
   /**
    * Model ids the current account has hidden from the picker, resolved per
    * read so an account switch is honored without rebuilding the adapter.
@@ -199,101 +187,73 @@ export interface WorkBuddyAdapter {
 }
 
 /**
+ * The single reasoning effort every reasoning model is pinned to.
+ *
+ * This build carries **one** effort instead of the upstream's per-model set.
+ * The catalog declares `supportedEfforts` per model and the plugin used to
+ * mirror it, falling back to a local *probe* for rows that declared nothing;
+ * both halves are gone here, so the discovery surface no longer exists and
+ * every reasoning model is sent this one value.
+ *
+ * `high` is the only value present in *every* declared set across both
+ * catalogs measured on this machine (WorkBuddy 7/7, WorkBuddy AI 15/15), which
+ * makes it the safest single choice for a model that states a set. Rows that
+ * declare nothing now receive it as well — a deliberate widening, since those
+ * rows previously got no `reasoning_effort` at all.
+ *
+ * Changing this constant moves every reasoning model to a different level; the
+ * mapping below needs no other edit. Prefer a value the catalog actually
+ * offers, or the endpoint will reject the request.
+ */
+export const FIXED_REASONING_EFFORT: WorkBuddyEffort = 'high'
+
+/**
  * Resolve a WorkBuddy model's reasoning capability into pi-ai's
  * `thinkingLevelMap` (every level pinned to its wire spelling or `null` for
  * unsupported), mirroring `dsh-llm-pi-ai`'s own `resolveModelReasoning`.
  *
- * Two sources, strictly ordered (`docs/reasoning-effort-probe-plan.md` §5):
+ * Only two outcomes exist: a model that reasons offers exactly
+ * {@link FIXED_REASONING_EFFORT} and nothing else, and a model that does not
+ * reason offers no control at all (pi-ai reads a falsy `reasoning` as "off
+ * only", and no `reasoning_effort` reaches the wire).
  *
- * 1. **The declared set.** When the upstream declares a non-empty
- *    `supportedEfforts`, exactly those values are offered and nothing else.
- *    This always wins: an observation never widens or narrows a declared set.
- * 2. **A local observation.** Rows without a declared set (the older
- *    `{effort, summary}` shape) normally get no control at all — their
- *    selectable set is client-side knowledge the catalog does not carry, and
- *    the desktop app differs per model there. If the user authorized a probe
- *    and it established that the upstream *validates* the parameter, the
- *    verified spellings are offered.
+ * `off` is never offered. The CN endpoint vetoes it outright on models that
+ * declare `onlyReasoning`: that catalog ships `onlyReasoning` and
+ * `canDisableThinking` both true on models such as `deepseek-v4.1-flash`,
+ * which cannot both hold, and the endpoint sides with `onlyReasoning`,
+ * answering HTTP 400 (「模型不支持该思考强度」). Pinning one effort removes the
+ * contradiction without needing a per-region rule.
  *
- * A `non-validating` observation deliberately yields no control: the upstream
- * accepts values that cannot exist (measured on `glm-5.2`), so every per-level
- * acceptance it produced would be a false positive.
- *
- * `off` is offered only when the upstream declares `canDisableThinking: true`.
- * It is never probed — disabling thinking is a separate capability, and the
- * per-model acceptance of `off` cannot be inferred from the row's shape.
- *
- * The CN endpoint vetoes `off` further, on models declaring `onlyReasoning`
- * — see {@link region} below. That rule is deliberately region-scoped:
- * the contradiction it resolves was measured on the CN catalog, and applying
- * it everywhere would have changed which levels the international picker
- * offers, which is outside this issue.
- *
- * The offered set is described internally as "verified accepted", never as
- * "verified effective": acceptance proves the upstream did not reject the
- * spelling, not that it changes what the model does.
- *
- * @param region - the endpoint this descriptor is for. Decides only whether
- * the `onlyReasoning` veto applies; every other rule is shared. Passed from
- * the variant descriptor, never inferred from a model id or a name.
+ * The offered level describes what the upstream *accepts*, never what it
+ * *does*: acceptance proves the spelling was not rejected, not that it changes
+ * the model's behaviour.
  */
 export function reasoningFields(
   info: WorkBuddyModelInfo,
-  observed?: WorkBuddyProbeRecord,
-  region: WorkBuddyRegion = 'cn',
 ): { reasoning: boolean; thinkingLevelMap?: ThinkingLevelMap } {
   const reasoning = info.reasoning
   if (reasoning === undefined || reasoning.supports !== true) {
-    // Not a reasoning model: pi-ai reads a falsy `reasoning` as "off only".
+    // Not a reasoning model: pi-ai reads a falsy `reasoning` as "off only",
+    // so the fixed value below can never reach a request for such a model.
     return { reasoning: false }
   }
-  const declared = reasoning.supportedEfforts
-  const efforts = declared !== undefined && declared.length > 0
-    ? declared
-    // Only a validating observation may supply a set, and only for rows the
-    // upstream left undeclared.
-    : observed?.validation === 'validating' && observed.efforts.length > 0
-      ? observed.efforts
-      : undefined
-  if (efforts === undefined) {
-    // Undeclared and unobserved (or observed as non-validating): no thinking
-    // control, and no `reasoning_effort` on the wire.
-    return { reasoning: false }
-  }
+  const fixed = FIXED_REASONING_EFFORT
   const map: Record<ModelThinkingLevel, string | null> = {
-    // Probing never grants `off`; only an explicit declaration does.
-    //
-    // On CN, `onlyReasoning` vetoes it even when declared. That catalog
-    // ships both flags true on `deepseek-v4.1-flash` and `kimi-k2.8-preview`,
-    // which cannot both hold — a model that only ever reasons has no
-    // non-thinking mode to select — and the endpoint sides with
-    // `onlyReasoning`, answering HTTP 400 (「模型不支持该思考强度」) for every
-    // `off` request. Offering a level that is certain to fail is worse than not
-    // offering it, so the contradiction is resolved toward the flag the wire
-    // agrees with.
-    //
-    // Scoped to CN on purpose: the international catalog does not carry this
-    // contradiction, and hiding Off there would remove a level those models
-    // can still use. The request layer strips the spelling in both regions
-    // (`dropUnsupportedEffort`), so a model whose flags flip between catalog
-    // reads cannot put `off` on the wire either way.
-    off: reasoning.canDisableThinking === true
-      && (region !== 'cn' || reasoning.onlyReasoning !== true)
-      && declared !== undefined && declared.length > 0 ? 'off' : null,
-    // `minimal` is not in the upstream effort vocabulary (EFFORT_VALUES), so
-    // no declared set — and no probe candidate — can ever contain it.
+    // `off` and `minimal` are never offered: the first is vetoed on CN (see
+    // above), and the second is not in the upstream effort vocabulary at all.
+    off: null,
     minimal: null,
-    low: efforts.includes('low') ? 'low' : null,
-    medium: efforts.includes('medium') ? 'medium' : null,
-    high: efforts.includes('high') ? 'high' : null,
-    xhigh: efforts.includes('xhigh') ? 'xhigh' : null,
-    max: efforts.includes('max') ? 'max' : null,
+    low: fixed === 'low' ? fixed : null,
+    medium: fixed === 'medium' ? fixed : null,
+    high: fixed === 'high' ? fixed : null,
+    xhigh: fixed === 'xhigh' ? fixed : null,
+    max: fixed === 'max' ? fixed : null,
   }
   return { reasoning: true, thinkingLevelMap: map as ThinkingLevelMap }
 }
 
 /** Build one pi-ai model descriptor pointing at the loopback shim. */
-function toPiModel(info: WorkBuddyModelInfo, baseUrl: string, observed: WorkBuddyProbeRecord | undefined, providerId: string, region: WorkBuddyRegion): Model<Api> {
+function toPiModel(info: WorkBuddyModelInfo, baseUrl: string, providerId: string): Model<Api> {
   return {
     id: info.id,
     name: info.name,
@@ -301,7 +261,7 @@ function toPiModel(info: WorkBuddyModelInfo, baseUrl: string, observed: WorkBudd
     provider: providerId,
     baseUrl,
     input: info.supportsImages === true ? ['text', 'image'] : ['text'],
-    ...reasoningFields(info, observed, region),
+    ...reasoningFields(info),
     cost: NO_COST,
     contextWindow: info.contextWindow,
     maxTokens: info.maxTokens,
@@ -324,16 +284,15 @@ function toPiModel(info: WorkBuddyModelInfo, baseUrl: string, observed: WorkBudd
  * `modelErrors` since 0.1.5-alpha.2.
  */
 export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBuddyAdapter {
-  const { shim, store, catalog, resolveAttachments, resolveImageAccess, observe, hidden } = options
+  const { shim, store, catalog, resolveAttachments, resolveImageAccess, hidden } = options
   const providerId = options.providerId ?? WORKBUDDY_PROVIDER
   const displayName = options.displayName ?? 'WorkBuddy'
-  const region = options.region ?? 'cn'
 
   const buildModels = (): Model<Api>[] => {
     // The OpenAI SDK pi-ai drives appends `/chat/completions` to baseURL,
     // so the shim's routes line up with the `/v1` prefix in place.
     const baseUrl = `${shim.baseUrl()}/v1`
-    return catalog.current().map(info => toPiModel(info, baseUrl, observe?.(info.id), providerId, region))
+    return catalog.current().map(info => toPiModel(info, baseUrl, providerId))
   }
 
   const base = createProvider({
@@ -365,8 +324,8 @@ export function createWorkBuddyAdapter(options: WorkBuddyAdapterOptions): WorkBu
     streamIdleTimeoutMs: WORKBUDDY_STREAM_IDLE_TIMEOUT_MS,
     retryPolicy: resolveRetryPolicy(undefined, 'dsh-workbuddy-connect retryPolicy'),
     configuredMaxTokens: new Map(),
-    // Required since 0.1.5-alpha.2; the live catalog only exposes models that
-    // probed successfully, so there is never a per-model failure to report.
+    // Required since 0.1.5-alpha.2. The live catalog is the roster, so there is
+    // never a per-model failure to report.
     modelErrors: new Map(),
     ...REQUEST_IMAGE_BUDGETS,
     piProvider: provider,

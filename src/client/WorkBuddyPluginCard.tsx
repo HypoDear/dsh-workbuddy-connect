@@ -10,7 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 import { WORKBUDDY_AI_PROBE_PATH, WORKBUDDY_AI_STATUS_PATH, WORKBUDDY_PROBE_PATH, WORKBUDDY_STATUS_PATH, isWorkBuddySignedOutReasonCode } from '../status-paths.ts'
 import type { WorkBuddyWebCreditExpiry } from '../status-paths.ts'
-import type { WorkBuddySignedOutReasonCode, WorkBuddyWebModelBadge, WorkBuddyWebProbeSection, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from '../status-paths.ts'
+import type { WorkBuddySignedOutReasonCode, WorkBuddyWebModelBadge, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from '../status-paths.ts'
 import { isWorkBuddyWebStatus } from './status-document.ts'
 import type { WorkBuddySettingsKey } from './locales.ts'
 
@@ -20,7 +20,7 @@ export interface WorkBuddyPluginCardInjected {
   /**
    * Which product variant this card instance renders.
    *
-   * Both cards share this component; the variant selects the status/probe
+   * Both cards share this component; the variant selects the status/control
    * routes and the title/intro copy. Defaults to the CN variant so a card
    * rendered without the injection keeps working.
    */
@@ -300,10 +300,6 @@ const confirmBoxStyle: CSSProperties = {
   background: 'var(--dsw-alias-bg-layer-1)',
 }
 const confirmRowStyle: CSSProperties = { display: 'flex', justifyContent: 'flex-end', gap: 8 }
-
-/** One probeable model's row: name on the left, state and action on the right. */
-const probeRowStyle: CSSProperties = { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }
-const probeRowEndStyle: CSSProperties = { display: 'inline-flex', alignItems: 'center', gap: 8, flex: '0 0 auto' }
 
 /**
  * Tab strip for the card body. Kept visually light — a full pill would compete
@@ -689,158 +685,6 @@ function formatTokens(tokens: number): string {
   return String(tokens)
 }
 
-/**
- * Reasoning-effort detection section: consent switches, per-model detection,
- * and the recorded observations.
- *
- * Two deliberate UX rules from the plan (§3.1, §3.2):
- * - the confirmation is shown *before* any request, and its copy states the
- *   credit caveat;
- * - a `non-validating` result is presented as an observation about the
- *   parameter ("this model does not check it"), never as a statement that a
- *   level is unsupported.
- */
-function ProbeSection({ probe, models, t, onDetect, onClear, busy }: {
-  probe: WorkBuddyWebProbeSection
-  /** Catalog rows from the same status document, for candidate display names. */
-  models: readonly WorkBuddyWebModelBadge[] | undefined
-  t: WorkBuddyPluginCardInjected['t']
-  onDetect: (modelId: string) => void
-  onClear: () => void
-  busy: boolean
-}): React.ReactNode {
-  // Which model is awaiting confirmation. Confirmation is inline for the same
-  // reason the Composer entry uses a bubble: a modal alert for a one-line
-  // decision is heavier than the action it guards.
-  const [pending, setPending] = useState<string>()
-  // Which model this card last asked to detect. `busy` alone cannot answer
-  // that — it is true for any in-flight request — so the running label needs
-  // the id, otherwise every candidate button claims to be running at once.
-  const [runningModel, setRunningModel] = useState<string>()
-  // A sweep that finishes (or a catalogue change that removes the candidate)
-  // must not leave a stale confirmation behind.
-  useEffect(() => {
-    if (pending !== undefined && !probe.candidates.includes(pending)) setPending(undefined)
-  }, [pending, probe.candidates])
-  // Clear the running label once the request settles.
-  //
-  // Keyed on `busy` alone this would fire immediately: the click that starts a
-  // detection sets `runningModel` and `busy` in one batch, and an effect that
-  // only checks `!busy` can still observe the pre-update value. So the label is
-  // armed on the way up and released only after the run has actually been seen
-  // in flight.
-  const runningArmed = useRef(false)
-  useEffect(() => {
-    if (runningModel === undefined) return
-    if (busy || probe.running) {
-      runningArmed.current = true
-      return
-    }
-    if (!runningArmed.current) return
-    runningArmed.current = false
-    setRunningModel(undefined)
-  }, [runningModel, busy, probe.running])
-  return (
-    <div style={quotaListStyle}>
-      <h3 style={quotaTitleStyle}>{t('probeHeading')}</h3>
-      <p style={bodyStyle}>{t('probeIntro')}</p>
-      <p style={bodyStyle}>{t('probeConsentHint')}</p>
-      {probe.running ? <p style={bodyStyle}>{t('probeRunningGeneric')}</p> : null}
-      {/*
-        * One row per probeable model, each carrying its own state and button.
-        *
-        * Previously the buttons lived in a block above the results, so a model
-        * that had been detected left the button list and reappeared only as a
-        * result below — re-running it meant clearing every other result. Rows
-        * keep the model and its action together, and the order is fixed by the
-        * catalog, so nothing moves when a detection lands.
-        */}
-      {probe.candidates.length === 0
-        ? <p style={bodyStyle}>{t('probeResultEmpty')}</p>
-        : (
-          <div style={quotaGroupStyle}>
-            {probe.candidates.map(id => {
-              const result = probe.results.find(entry => entry.id === id)
-              // Display name: the catalog's own label first, then whatever the
-              // recorded probe stored, then the bare id. The *action* below
-              // keeps using the id regardless of what the name resolves to.
-              const name = models?.find(model => model.id === id)?.name ?? result?.name ?? id
-              return (
-                <div key={id} style={modelOfferStyle}>
-                  <div style={probeRowStyle}>
-                    <span>{name}</span>
-                    <span style={probeRowEndStyle}>
-                      {result === undefined ? null : (
-                        <span style={modelBadgeChipStyle}>
-                          {result.validation === 'validating' && result.efforts.length > 0
-                            ? result.efforts.join(' / ')
-                            : t(result.validation === 'non-validating' ? 'probeResultNotValidating' : 'probeResultUnknown')}
-                        </span>
-                      )}
-                      <button
-                        type="button"
-                        style={buttonStyle}
-                        disabled={probe.running || busy}
-                        onClick={() => { setPending(id) }}
-                      >
-                        {/*
-                          * Only the button that was actually pressed reports
-                          * progress; the card-wide `busy` flag is true for any
-                          * in-flight request, so it cannot pick the label.
-                          */}
-                        {runningModel === id
-                          ? t('probeRunning', { model: name })
-                          : t(result === undefined ? 'probeStart' : 'probeRedetect')}
-                      </button>
-                    </span>
-                  </div>
-                  {result === undefined ? null
-                    : <span style={modelRateStyle}>{t('probeResultAt', { time: formatTime(result.probedAt) })}</span>}
-                  {/*
-                    * The confirmation expands inside the row it belongs to.
-                    * Rendered after the whole list it sat at the bottom of a
-                    * long candidate list, so the question ("send requests to
-                    * this model?") was a screen away from the button that
-                    * asked it. In-flow placement keeps them together and needs
-                    * no positioning or overflow handling.
-                    */}
-                  {pending === id ? (
-                    <div style={confirmBoxStyle}>
-                      <p style={bodyStyle}>{t('probeConfirmBody', { model: name })}</p>
-                      <div style={confirmRowStyle}>
-                        <button type="button" style={buttonStyle} onClick={() => { setPending(undefined) }}>
-                          {t('cancel')}
-                        </button>
-                        <button
-                          type="button"
-                          style={primaryButtonStyle}
-                          disabled={probe.running || busy}
-                          onClick={() => {
-                            setRunningModel(id)
-                            setPending(undefined)
-                            onDetect(id)
-                          }}
-                        >
-                          {t('probeConfirmAction')}
-                        </button>
-                      </div>
-                    </div>
-                  ) : null}
-                </div>
-              )
-            })}
-          </div>
-        )}
-
-      {probe.results.length === 0 ? null : (
-        <button type="button" style={buttonStyle} disabled={busy} onClick={() => { onClear() }}>
-          {t('probeClear')}
-        </button>
-      )}
-    </div>
-  )
-}
-
 /** Render WorkBuddy sign-in state and credit as one expandable card. */
 export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyPluginCardProps) {
   if (t === undefined) throw new Error('WorkBuddy plugin card requires its translation function')
@@ -1044,10 +888,10 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
    * Run one control action and refresh the card's state afterwards.
    *
    * The key travels in a header, not the body: it authorizes the write, and
-   * the host never accepts a prompt, a sentinel, or a model outside its own
-   * catalog from here.
+   * the host validates every field against its own state and the signed-in
+   * account before persisting anything.
    */
-  const control = useCallback(async (action: { action: 'probe'; model: string } | { action: 'clear' } | { action: 'set-maximum-context-window'; enabled: boolean } | { action: 'set-model-visibility'; model: string; visible: boolean; account: string }): Promise<void> => {
+  const control = useCallback(async (action: { action: 'set-maximum-context-window'; enabled: boolean } | { action: 'set-model-visibility'; model: string; visible: boolean; account: string }): Promise<void> => {
     const key = status?.status === 'signed-in' ? status.probeKey : undefined
     if (key === undefined) return
     // A visibility toggle runs on its own per-row in-flight set so the
@@ -1113,14 +957,6 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
       else setBusy(false)
     }
   }, [refresh, status, t, trackController, variant.probePath])
-
-  /**
-   * Start a detection. Confirmation happens inline in the section, so this is
-   * only ever called after the user has already agreed.
-   */
-  const confirmDetect = useCallback((modelId: string): void => {
-    void control({ action: 'probe', model: modelId })
-  }, [control])
 
   const title = t(variant.titleKey)
   /**
@@ -1283,16 +1119,6 @@ export function WorkBuddyPluginCard({ t, variant = CN_CARD_VARIANT }: WorkBuddyP
                       )}
                       {status.creditsError === undefined ? null
                         : <p style={errorStyle}>{t('creditsError', { message: status.creditsError })}</p>}
-                      {status.probe === undefined ? null : (
-                        <ProbeSection
-                          probe={status.probe}
-                          models={status.models}
-                          t={t}
-                          busy={busy}
-                          onDetect={confirmDetect}
-                          onClear={() => { void control({ action: 'clear' }) }}
-                        />
-                      )}
                     </div>
                   ) : tab === 'context' ? (
                     <div style={tabPanelStyle}>
