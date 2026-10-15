@@ -412,7 +412,26 @@ class WorkBuddyPiAiAdapter extends PiAiAdapter {
   override async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
     const resolved = await super.resolveModel(provider, model, signal)
     const info = this.infoFor(model)
-    if (info === undefined) return resolved
-    return { ...resolved, name: withCatalogDisplay(resolved.name, info) }
+    const named = info === undefined ? resolved : { ...resolved, name: withCatalogDisplay(resolved.name, info) }
+    const reasoning = resolved.reasoning
+    // Only a reasoning model carries `reasoning` at all — the host's
+    // `reasoningInfo` omits the field for every other model — so its absence is
+    // the signal that there is no level to name.
+    if (reasoning === undefined || reasoning.efforts.length === 0) return named
+    // Naming the pinned level is what removes the picker's extra "provider
+    // default" row. DSH builds that row only while `defaultEffort` is undefined
+    // (`dsh-client-ui-model-selection`, `effortChoices`), and it is the one
+    // choice left that this build cannot honour: it means "send no
+    // `reasoning_effort` at all", which is exactly what fixing the effort
+    // removed. Naming it also makes the host attach the level to a fresh
+    // model selection, so the picker cannot leave the field unset.
+    //
+    // Read off `efforts` rather than the constant so the id is byte-identical
+    // to the one the host matches selections against; this build's map offers
+    // exactly one level, so the first entry is the pinned one.
+    return {
+      ...named,
+      reasoning: { ...reasoning, defaultEffort: reasoning.efforts[0]!.id },
+    }
   }
 }

@@ -50,6 +50,10 @@ export const FIXED_REASONING_EFFORT: WorkBuddyEffort = 'high'
 - **不会推理的模型**：不提供档位控件，也不发送 `reasoning_effort`；
 - `off` / `minimal` 永不提供 —— 国内版端点对声明 `onlyReasoning` 的模型直接拒绝 `off`，
   而固定单档后这条矛盾连规则都不需要了。
+- **连「默认」那一行也没有**：DSH 的选择器只在模型没有声明 `defaultEffort` 时补一行
+  「provider default」，其含义是"什么 effort 都不发"—— 那正好是本分支要去掉的。
+  所以 `resolveModel` 把本档位**一并声明为默认档**，选择器里就只剩 `high` 一项，
+  而且它显示为当前值。
 
 **为什么选 `high`**：在实测的两个目录里，凡是声明了档位集合的模型，**都**包含 `high`
 （国内版 7/7、国际版 15/15），所以它是单值方案里唯一"对每个声明过的模型都安全"的取值。
