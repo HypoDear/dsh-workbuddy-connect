@@ -322,6 +322,14 @@ function ModelProbe({ model, card, t, sessionId, sessions }: {
   const [switching, setSwitching] = useState(false)
   /** Why the last switch attempt failed, shown beside the limit. */
   const [switchError, setSwitchError] = useState<string>()
+  /**
+   * The provider a successful switch moved this session to.
+   *
+   * Kept so the click leaves a visible trace: the host applies the new selection
+   * to the *next* request, so the seat's own model does not change at click time
+   * and a silent success is indistinguishable from a dead button.
+   */
+  const [switchedTo, setSwitchedTo] = useState<string>()
   const inFlight = useRef(false)
   const refreshingRef = useRef(false)
   const mounted = useRef(false)
@@ -428,6 +436,12 @@ function ModelProbe({ model, card, t, sessionId, sessions }: {
    * failed and the user decides whether to send again. Resending silently would
    * answer the previous prompt from a different account than the one the user
    * was watching, and would hide which account paid for it.
+   *
+   * The host applies the change to the *next* request (`selectForNextRequest`
+   * writes the session projection's `pending` slot), so nothing about this seat
+   * can visibly change at click time. Confirming in words is therefore the whole
+   * feedback — without it the click reads as a no-op, which is exactly how it was
+   * first reported.
    */
   const switchAway = async (): Promise<void> => {
     if (fallback === undefined || switching) return
@@ -442,9 +456,7 @@ function ModelProbe({ model, card, t, sessionId, sessions }: {
       if (!result.ok) {
         throw new Error(result.error === undefined ? t('requestFailed') : `${result.error.code}: ${result.error.message}`)
       }
-      // The seat is keyed by model, so the switch remounts this control against
-      // the new selection; a trailing read keeps the balance honest meanwhile.
-      await refresh().catch(() => { /* the seat re-reads on remount anyway */ })
+      if (mounted.current) setSwitchedTo(fallback.provider)
     } catch (error: unknown) {
       if (mounted.current) setSwitchError(error instanceof Error ? error.message : t('requestFailed'))
     } finally {
@@ -462,7 +474,13 @@ function ModelProbe({ model, card, t, sessionId, sessions }: {
         </span>
       )}
 
-      {fallback === undefined ? null : (
+      {switchedTo === undefined ? null : (
+        <span style={limitStyle} title={t('composerRateLimitSwitchedHint')}>
+          {t('composerRateLimitSwitched', { provider: switchedTo })}
+        </span>
+      )}
+
+      {fallback === undefined || switchedTo !== undefined ? null : (
         <button
           type="button"
           style={{ ...switchStyle, opacity: switching ? 0.6 : 1, cursor: switching ? 'default' : 'pointer' }}
