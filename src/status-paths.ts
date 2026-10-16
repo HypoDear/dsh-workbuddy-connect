@@ -25,7 +25,29 @@ export const WORKBUDDY_PROBE_PATH = '/plugins/dsh-workbuddy-connect/probe'
 export const WORKBUDDY_AI_STATUS_PATH = '/plugins/dsh-workbuddy-connect/ai/status'
 export const WORKBUDDY_AI_PROBE_PATH = '/plugins/dsh-workbuddy-connect/ai/probe'
 
-/** One model's recorded probe observation, as the card displays it. */
+/**
+ * One model's recorded rate limit, as the composer control displays it.
+ *
+ * Deliberately just the observed facts: which model, when the gateway said the
+ * limit lifts, and what it said. The control derives "still blocked" from
+ * `resetAtMs` against the current clock rather than trusting a boolean, so a
+ * document that sat in a cache cannot claim a model is blocked after it cleared.
+ */
+export interface WorkBuddyWebRateLimit {
+  /** Model id the gateway refused. Limits are per model, not per account. */
+  model: string
+  /** When the limit lifts, epoch milliseconds. */
+  resetAtMs: number
+  /** The gateway's own message, trimmed. */
+  reason: string
+}
+
+/** Rate-limit section of the status document. */
+export interface WorkBuddyWebRateLimitSection {
+  /** Limits still in force for the signed-in account. */
+  active: readonly WorkBuddyWebRateLimit[]
+}
+
 /** Action requested from the control route. */
 export interface WorkBuddyProbeAction {
   /**
@@ -35,7 +57,10 @@ export interface WorkBuddyProbeAction {
    * account's picker.
    *
    * All three are writes, which is why they share this route's in-process key
-   * and loopback guards rather than the read-only status GET.
+   * and loopback guards rather than the read-only status GET. Moving a session to
+   * another model is deliberately *not* here: the composer control already holds
+   * the session id and the client-side `sessions` service, so it performs that
+   * switch directly instead of round-tripping through the host.
    */
   action: 'refresh' | 'set-maximum-context-window' | 'set-model-visibility'
   /** Target model id; required for `set-model-visibility`. */
@@ -260,6 +285,14 @@ export type WorkBuddyWebStatus =
     useMaximumContextWindow?: boolean
     /** Per-account hidden-model state for the card's visibility controls. */
     visibility?: WorkBuddyWebVisibilitySection
+    /**
+     * Per-model rate limits still in force, for the composer control.
+     *
+     * Present only when something is actually limited; an absent field and an
+     * empty list both mean "nothing is throttled", and the control renders no
+     * limit affordance for either.
+     */
+    rateLimit?: WorkBuddyWebRateLimitSection
     /**
      * In-process key authorizing probe control writes. Handed to the card with
      * the status document (the card is same-origin and already had to pass the

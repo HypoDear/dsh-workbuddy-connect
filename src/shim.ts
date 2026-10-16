@@ -52,6 +52,19 @@ export interface WorkBuddyShimOptions {
   client: Pick<WorkBuddyUpstreamClient, 'chatStream'>
   catalog: WorkBuddyCatalog
   logger?: ShimLogger
+  /**
+   * Called for every 429 the upstream answers, with the model the request named.
+   *
+   * The shim is the only place that sees both the model being asked for and the
+   * upstream's refusal, so it is where a limit is recorded. Failures here must
+   * never affect the request: recording is bookkeeping, not part of answering.
+   */
+  onRateLimited?: (model: string, body: string) => void
+  /**
+   * Called after a request succeeds for `model`, so a stale record can be dropped
+   * as soon as the model is demonstrably usable again.
+   */
+  onModelUsable?: (model: string) => void
 }
 
 const REQUEST_BODY_LIMIT = 64 * 1024 * 1024
@@ -82,6 +95,24 @@ function writeOpenAIError(res: ServerResponse, status: number, kind: string, mes
   writeJson(res, status, { error: { message, type: kind, code: kind } })
 }
 
+/**
+ * The model id a prepared chat body names, for attributing a 429.
+ *
+ * The gateway throttles per model, so a limit is only meaningful next to the id
+ * that hit it. A body that does not parse, or carries no string `model`, simply
+ * yields `undefined` and the limit goes unrecorded — never guessed.
+ */
+function modelOf(bodyJson: string): string | undefined {
+  try {
+    const parsed: unknown = JSON.parse(bodyJson)
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined
+    const model = (parsed as Record<string, unknown>)['model']
+    return typeof model === 'string' && model !== '' ? model : undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Read a request body with a size cap; over-limit bodies fail the request. */
 function readBody(req: IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {
@@ -108,6 +139,8 @@ function readBody(req: IncomingMessage): Promise<Buffer> {
 export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShim {
   const { store, client, catalog } = options
   const logger = options.logger
+  const onRateLimited = options.onRateLimited
+  const onModelUsable = options.onModelUsable
 
   // Per-process shared secret. Lives only in memory; the adapter resolves it
   // as the OpenAI apiKey, which pi-ai sends as `Authorization: Bearer ...`.
@@ -215,7 +248,19 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
 
     const controller = new AbortController()
     req.on('close', () => controller.abort())
-    const result = await client.chatStream(credential, prepared, controller.signal)
+    const result = await client.chatStream(credential, prepared, controller.signal, (status, body) => {
+      // Record the upstream's own words before classification reduces them to
+      // `soft_rate`. A 429 names the instant the limit lifts, and this is the
+      // only point in the pipeline that still has the body.
+      if (status !== 429 || onRateLimited === undefined) return
+      const model = modelOf(prepared)
+      if (model === undefined) return
+      try {
+        onRateLimited(model, body)
+      } catch (error: unknown) {
+        logger?.warn('dsh-workbuddy-connect: could not record rate limit', error)
+      }
+    })
 
     if (!result.ok) {
       const detail = extractDisplayErrorMessage(result.message) ?? result.message.slice(0, 400)
@@ -244,6 +289,19 @@ export function createWorkBuddyShim(options: WorkBuddyShimOptions): WorkBuddyShi
       'Connection': 'keep-alive',
       'X-Accel-Buffering': 'no',
     })
+    // A 200 proves the model is usable right now, so any recorded limit for it is
+    // stale — clearing here means a lifted limit stops being displayed at the
+    // first successful message rather than waiting for its timestamp to pass.
+    if (onModelUsable !== undefined) {
+      const model = modelOf(prepared)
+      if (model !== undefined) {
+        try {
+          onModelUsable(model)
+        } catch (error: unknown) {
+          logger?.warn('dsh-workbuddy-connect: could not clear rate limit', error)
+        }
+      }
+    }
     let sawDone = false
     const body = Readable.fromWeb(result.response.body as Parameters<typeof Readable.fromWeb>[0])
     body.on('data', (chunk: Buffer) => {

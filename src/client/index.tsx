@@ -213,7 +213,7 @@ export function apply(ctx: ClientContext): void {
   // may arrive after this fiber starts, so the scoped callback — and the slot
   // callback inside it — are guarded at their own boundaries too.
   guardClientContribution('conversation probe control', () => {
-    ctx.inject(['modelDirectories'], scope => {
+    ctx.inject(['modelDirectories', 'sessions'], scope => {
       guardClientContribution('conversation probe control', () => {
         scope.slots.inject('conversation.input.right', () => (
           guardClientContribution('conversation probe control', () => scope.slots.register({
@@ -224,6 +224,12 @@ export function apply(ctx: ClientContext): void {
               directory: scope.modelDirectories.directoryFor(
                 sessionId as Parameters<typeof scope.modelDirectories.directoryFor>[0],
               ).store,
+              // Handed through so the control can move *this* session off a
+              // throttled model. The switch runs through the same
+              // `sessions.selectModel` the official picker uses, so the session
+              // projection and every other seat stay consistent with it.
+              sessionId: sessionId as string,
+              sessions: scope.sessions,
               t,
             }),
           }, WorkBuddyProbeControl)) ?? NOOP_DISPOSER

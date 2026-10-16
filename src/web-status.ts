@@ -15,7 +15,7 @@ import { normalizeCredits } from './upstream.ts'
 import type { WorkBuddyModelInfo } from './catalog.ts'
 import { hostIsLoopback, originIsLoopback } from './loopback.ts'
 import { WORKBUDDY_STATUS_PATH } from './status-paths.ts'
-import type { WorkBuddyWebCatalog, WorkBuddyWebModelBadge, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from './status-paths.ts'
+import type { WorkBuddyWebCatalog, WorkBuddyWebModelBadge, WorkBuddyWebRateLimitSection, WorkBuddyWebStatus, WorkBuddyWebVisibilitySection } from './status-paths.ts'
 
 export { WORKBUDDY_STATUS_PATH } from './status-paths.ts'
 export type { WorkBuddyWebStatus } from './status-paths.ts'
@@ -48,6 +48,15 @@ export interface WorkBuddyStatusRouteOptions {
    * no visibility controls rather than a list every such account would share.
    */
   visibility?: () => WorkBuddyWebVisibilitySection | undefined
+  /**
+   * Per-model rate limits still in force, for the composer control.
+   *
+   * Undefined when the caller offers none (tests, headless profiles). The getter
+   * reads the store on every call rather than caching, so a limit recorded by an
+   * in-flight request is visible on the very next poll — the control has no other
+   * way to learn that the model it is showing just got throttled.
+   */
+  rateLimit?: () => WorkBuddyWebRateLimitSection | undefined
   /**
    * Route path to mount. Defaults to the CN variant's path so existing callers
    * and tests keep their behaviour; the international variant passes its own.
@@ -168,9 +177,16 @@ export async function workBuddyWebStatus(
   // section's presence.
   const visibility = deps.visibility?.()
   const withVisibility: WorkBuddyWebStatus = visibility === undefined ? withCatalog : { ...withCatalog, visibility }
+  // Rate limits ride beside the model list too: the composer control needs them
+  // against the model the user has selected, and an empty section is omitted so
+  // the control's "is anything limited" test stays a simple presence check.
+  const rateLimit = deps.rateLimit?.()
+  const withRateLimit: WorkBuddyWebStatus = rateLimit === undefined || rateLimit.active.length === 0
+    ? withVisibility
+    : { ...withVisibility, rateLimit }
   const statusWithModels: WorkBuddyWebStatus = modelsField.length > 0
-    ? { ...withVisibility, models: modelsField }
-    : withVisibility
+    ? { ...withRateLimit, models: modelsField }
+    : withRateLimit
   // The control key and the international context-window preference ride the
   // signed-in document. The key authorizes only control-route writes, never
   // credentials or completions, and this response has already passed the

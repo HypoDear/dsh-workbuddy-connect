@@ -439,7 +439,17 @@ declare class WorkBuddyUpstreamClient {
   lastCatalog: WorkBuddyCatalogFetch | undefined;
   constructor(options?: WorkBuddyUpstreamClientOptions);
   /** POST the chat endpoint; a successful answer is the raw SSE response. */
-  chatStream(credential: WorkBuddyCredential, bodyJson: string, signal?: AbortSignal): Promise<WorkBuddyChatResult>;
+  chatStream(credential: WorkBuddyCredential, bodyJson: string, signal?: AbortSignal,
+  /**
+   * Notified with the status and body of every non-2xx answer, before the
+   * result is classified.
+   *
+   * Exists so a caller can record what the classification throws away: a 429's
+   * body carries the reset instant as prose, and {@link classifyUpstreamError}
+   * reduces the whole response to `soft_rate`. Optional, so the client stays
+   * usable without a store behind it.
+   */
+  onError?: (status: number, body: string) => void): Promise<WorkBuddyChatResult>;
   /** POST the token-refresh endpoint; the caller merges the outcome. */
   refreshToken(credential: WorkBuddyCredential): Promise<WorkBuddyRefreshOutcome>;
   /**
@@ -648,6 +658,14 @@ interface WorkBuddyVariant {
    * answer for the other's picker.
    */
   visibilityFilename: string;
+  /**
+   * Basename of this variant's rate-limit file under `$DSH_HOME`.
+   *
+   * Split per variant for the same reason the visibility lists are: the two
+   * endpoints throttle independently, so one variant's recorded limit must never
+   * be read as the other's.
+   */
+  rateLimitFilename: string;
   /** Same-origin status route consumed by this variant's card. */
   statusPath: string;
   /** Same-origin probe-control route consumed by this variant's card. */
@@ -1168,6 +1186,19 @@ interface WorkBuddyShimOptions {
   client: Pick<WorkBuddyUpstreamClient, 'chatStream'>;
   catalog: WorkBuddyCatalog;
   logger?: ShimLogger;
+  /**
+   * Called for every 429 the upstream answers, with the model the request named.
+   *
+   * The shim is the only place that sees both the model being asked for and the
+   * upstream's refusal, so it is where a limit is recorded. Failures here must
+   * never affect the request: recording is bookkeeping, not part of answering.
+   */
+  onRateLimited?: (model: string, body: string) => void;
+  /**
+   * Called after a request succeeds for `model`, so a stale record can be dropped
+   * as soon as the model is demonstrably usable again.
+   */
+  onModelUsable?: (model: string) => void;
 }
 /**
  * Start the loopback endpoint. Requests carry any bearer; the loopback bind

@@ -23,6 +23,8 @@ import { atRestKeyProviderFor, WorkBuddyAtRestKeyProvider } from './desktop-cred
 import { FALLBACK_WORKBUDDY_AI_MODELS, FALLBACK_WORKBUDDY_MODELS, WorkBuddyCatalog } from './catalog.ts'
 import { workbuddyCatalogPath, WorkBuddyCatalogStore } from './catalog-store.ts'
 import { WorkBuddyVisibilityStore, workbuddyVisibilityPath } from './visibility-store.ts'
+import { WorkBuddyRateLimitStore, workbuddyRateLimitPath } from './rate-limit-store.ts'
+import { parseRateLimitReset, rateLimitReason } from './rate-limit.ts'
 import { createWorkBuddyAdapter } from './adapter.ts'
 import { createWorkBuddyShim } from './shim.ts'
 import { WorkBuddyUpstreamClient } from './upstream.ts'
@@ -290,6 +292,11 @@ interface VariantRuntime {
    */
   visibilityStore: WorkBuddyVisibilityStore
   /**
+   * Recorded per-model rate limits for this variant, persisted so a limit
+   * recorded before a restart still reads correctly afterwards.
+   */
+  rateLimitStore: WorkBuddyRateLimitStore
+  /**
    * The visibility account key currently in effect (`uid:enterpriseId`), or
    * undefined when signed out or the credential carries no uid. Read per call,
    * so an account switch changes the answer without rebuilding anything.
@@ -408,6 +415,9 @@ function createVariantRuntime(
   const visibilityStore = new WorkBuddyVisibilityStore(
     workbuddyVisibilityPath(variant.visibilityFilename),
   )
+  const rateLimitStore = new WorkBuddyRateLimitStore(
+    workbuddyRateLimitPath(variant.rateLimitFilename),
+  )
   return {
     variant,
     store,
@@ -415,6 +425,7 @@ function createVariantRuntime(
     catalog,
     savedCatalogs,
     visibilityStore,
+    rateLimitStore,
     account: () => accountOf(variant.id),
     fallback,
     catalogSource: 'fallback',
@@ -456,7 +467,33 @@ function catalogSection(runtime: VariantRuntime): WorkBuddyWebCatalog {
  */
 async function startVariant(ctx: Context, runtime: VariantRuntime): Promise<boolean> {
   const { variant, store, client, catalog } = runtime
-  const shim = createWorkBuddyShim({ store, client, catalog, logger: ctx.logger })
+  const shim = createWorkBuddyShim({
+    store,
+    client,
+    catalog,
+    logger: ctx.logger,
+    // The shim sees both the model that was asked for and the upstream's refusal,
+    // which is the only point where a 429 can be attributed to a model. The
+    // account key is resolved here, per call, so a limit recorded just before an
+    // account switch still lands under the account that earned it.
+    onRateLimited: (model, body) => {
+      const account = runtime.account()
+      if (account === undefined) return
+      const resetAtMs = parseRateLimitReset(body)
+      if (resetAtMs === undefined) return
+      runtime.rateLimitStore.record(account, {
+        model,
+        resetAtMs,
+        seenAtMs: Date.now(),
+        raw: rateLimitReason(body),
+      })
+    },
+    onModelUsable: model => {
+      const account = runtime.account()
+      if (account === undefined) return
+      runtime.rateLimitStore.clear(account, model)
+    },
+  })
   try {
     await shim.ready
   } catch (error: unknown) {
@@ -682,6 +719,20 @@ export function apply(ctx: Context, config: Config): void {
         models: () => runtime.catalog.current(),
         catalog: () => catalogSection(runtime),
         probeKey,
+        // Read from the store on every poll, so a 429 observed by an in-flight
+        // request shows up on the control's next tick without any push channel.
+        rateLimit: () => {
+          const account = runtime.account()
+          if (account === undefined) return undefined
+          const active = runtime.rateLimitStore.activeFor(account)
+          return active.length === 0 ? undefined : {
+            active: active.map(limit => ({
+              model: limit.model,
+              resetAtMs: limit.resetAtMs,
+              reason: limit.raw,
+            })),
+          }
+        },
         // The full per-account hidden list — stale ids included — so the card's
         // checkboxes answer exactly what the picker filter reads. Absent (and
         // the card renders no controls) when no uid-keyed account is in effect.

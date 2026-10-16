@@ -805,6 +805,16 @@ export class WorkBuddyUpstreamClient {
     credential: WorkBuddyCredential,
     bodyJson: string,
     signal?: AbortSignal,
+    /**
+     * Notified with the status and body of every non-2xx answer, before the
+     * result is classified.
+     *
+     * Exists so a caller can record what the classification throws away: a 429's
+     * body carries the reset instant as prose, and {@link classifyUpstreamError}
+     * reduces the whole response to `soft_rate`. Optional, so the client stays
+     * usable without a store behind it.
+     */
+    onError?: (status: number, body: string) => void,
   ): Promise<WorkBuddyChatResult> {
     const region = regionOf(credential.domain)
     // Identity resolution must never block a message: any failure — a thrown
@@ -832,6 +842,7 @@ export class WorkBuddyUpstreamClient {
     }
     if (response.ok) return { ok: true, response }
     const text = (await response.text()).slice(0, ERROR_BODY_LIMIT)
+    onError?.(response.status, text)
     return {
       ok: false,
       status: response.status,

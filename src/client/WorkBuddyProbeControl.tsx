@@ -30,11 +30,87 @@ import type { CSSProperties } from 'react'
 import type { ModelDirectory } from '@deepseek-ai/dsh-client-ui-model-selection/client'
 import { CARD_VARIANTS, type WorkBuddyCardVariant, type WorkBuddyPluginCardInjected } from './WorkBuddyPluginCard.tsx'
 import { isWorkBuddyWebStatus } from './status-document.ts'
-import type { WorkBuddyWebStatus } from '../status-paths.ts'
+import type { WorkBuddyWebRateLimit, WorkBuddyWebStatus } from '../status-paths.ts'
+
+/**
+ * The slice of the client's `sessions` service this control needs.
+ *
+ * Structural rather than imported: the service is a cordis dependency the host
+ * declares, and the plugin's client bundle is built without the package that
+ * types it. Only `selectModel` is named, so nothing else about the service leaks
+ * into this component.
+ */
+export interface WorkBuddySessionSelection {
+  selectModel(request: {
+    sessionId: string
+    provider: string
+    model: string
+    reasoningEffort?: string
+  }): Promise<{ ok: boolean; error?: { code: string; message: string } }>
+}
 
 /** Injected props; `directory` resolves the session's current model selection. */
 export interface WorkBuddyProbeControlProps extends WorkBuddyPluginCardInjected {
   directory: ModelDirectory['store']
+  /** Session this seat is rendered for; the switch retargets exactly this one. */
+  sessionId: string
+  /** Session controller, used to move off a throttled model. */
+  sessions: WorkBuddySessionSelection
+}
+
+/**
+ * The rate limit that applies to one model right now, if any.
+ *
+ * Limits are per model, so a record for a different model is ignored: the seat
+ * annotates the model the user has selected, and decorating it with another
+ * model's limit would be actively misleading. `resetAtMs` is compared against the
+ * current clock rather than trusted, so a document that was cached across the
+ * reset instant cannot keep claiming the model is blocked.
+ */
+function rateLimitFor(status: WorkBuddyWebStatus | undefined, model: string): WorkBuddyWebRateLimit | undefined {
+  if (status === undefined || status.status !== 'signed-in') return undefined
+  const active = status.rateLimit?.active
+  if (active === undefined) return undefined
+  const now = Date.now()
+  return active.find(limit => limit.model === model && limit.resetAtMs > now)
+}
+
+/**
+ * The reset instant as a short local time, e.g. `09:54`.
+ *
+ * Only the clock time is shown, not a date: the window is 12 hours, so a limit
+ * always lifts within the same day or the next morning, and a bare time reads
+ * faster next to the balance than a full timestamp. A reset that lands on a later
+ * calendar day than today gets a day prefix so "09:54" cannot be misread as
+ * today.
+ */
+function formatResetTime(resetAtMs: number): string {
+  const reset = new Date(resetAtMs)
+  const time = `${String(reset.getHours()).padStart(2, '0')}:${String(reset.getMinutes()).padStart(2, '0')}`
+  const today = new Date()
+  const sameDay = reset.getFullYear() === today.getFullYear()
+    && reset.getMonth() === today.getMonth()
+    && reset.getDate() === today.getDate()
+  return sameDay ? time : `${reset.getMonth() + 1}/${reset.getDate()} ${time}`
+}
+
+/**
+ * Where this seat should send the session when its model is throttled.
+ *
+ * The user runs the same model on both endpoints and rotates between them, so the
+ * fallback is the sibling variant serving the *same model id* — never a different
+ * model, which would change what they are talking to without being asked.
+ *
+ * The sibling's own catalog is deliberately not consulted: the status document
+ * this control holds describes one variant, and fetching the other's on every
+ * render would add a request per paint. A model the sibling does not serve
+ * therefore surfaces as the switch's own error, which the control displays —
+ * cheaper and more honest than a silent no-op or a guessed alternative.
+ */
+function fallbackFor(card: WorkBuddyCardVariant, model: string): { provider: string, model: string } | undefined {
+  const sibling = CARD_VARIANTS.find(candidate => candidate.id !== card.id)
+  if (sibling === undefined || model === '') return undefined
+  return { provider: sibling.id, model }
 }
 
 /**
@@ -94,6 +170,47 @@ const refreshStyle: CSSProperties = {
   color: 'var(--dsw-alias-label-tertiary)',
 }
 
+/**
+ * The rate-limit annotation, sitting between the balance and the ↻.
+ *
+ * Warning-toned rather than error-toned: a throttled model is a state the user
+ * works around by switching, not a failure of the plugin. Kept to the same
+ * annotation register as the balance so the seat does not grow a second visual
+ * weight, and allowed to shrink because the copy carries a time.
+ */
+const limitStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  gap: 4,
+  minWidth: 0,
+  fontSize: 12,
+  lineHeight: '18px',
+  whiteSpace: 'nowrap',
+  color: 'var(--dsw-alias-state-warn-primary, #b26a00)',
+}
+
+/**
+ * The switch affordance shown beside a limit.
+ *
+ * A real button, not a link: it performs a state change the user must be able to
+ * see and hit on a phone-sized target. Sized to the seat's 20px control height so
+ * it lines up with the ↻ next to it rather than making the row ragged.
+ */
+const switchStyle: CSSProperties = {
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  height: 20,
+  padding: '0 8px',
+  border: '1px solid var(--dsw-alias-border-l2)',
+  borderRadius: 6,
+  background: 'transparent',
+  color: 'var(--dsw-alias-label-secondary)',
+  fontSize: 12,
+  lineHeight: '18px',
+  whiteSpace: 'nowrap',
+}
+
 /** Tooltip bubble: the Fast Mode shape (nowrap, one line, above the control). */
 /** Confirmation bubble: same anchor, but interactive and allowed to wrap. */
 /**
@@ -147,7 +264,7 @@ function creditBadge(
 }
 
 /** Model-independent shell: resolves the selection, then delegates per model. */
-export function WorkBuddyProbeControl({ directory, t }: WorkBuddyProbeControlProps) {
+export function WorkBuddyProbeControl({ directory, t, sessionId, sessions }: WorkBuddyProbeControlProps) {
   const subscribe = useCallback((listener: () => void) => directory.subscribe(listener), [directory])
   const snapshot = useCallback(() => directory.getSnapshot(), [directory])
   // The host's `ModelDirectoryState.current` is `ModelSelection | null` — null,
@@ -183,22 +300,28 @@ export function WorkBuddyProbeControl({ directory, t }: WorkBuddyProbeControlPro
   // A new selection gets fresh state; a late response cannot target the new model.
   return card === undefined
     ? null
-    : <ModelProbe key={`${card.id}:${selection.model}`} model={selection.model} card={card} t={t} />
+    : <ModelProbe key={`${card.id}:${selection.model}`} model={selection.model} card={card} t={t} sessionId={sessionId} sessions={sessions} />
 }
 
-function ModelProbe({ model, card, t }: {
+function ModelProbe({ model, card, t, sessionId, sessions }: {
   model: string
   card: WorkBuddyCardVariant
+  sessionId: string
+  sessions: WorkBuddySessionSelection
 } & WorkBuddyPluginCardInjected) {
   const [status, setStatus] = useState<WorkBuddyWebStatus>()
   /**
    * A manual credit read failed (#99). The balance hides until a later read
-   * succeeds, so the old number can never pose as current; the probe state is
+   * succeeds, so the old number never poses as current; the rate-limit state is
    * untouched — the two features merely share one document.
    */
   const [creditFailed, setCreditFailed] = useState(false)
   /** Whether a manual credit refresh is in flight, for the ↻'s busy state. */
   const [refreshing, setRefreshing] = useState(false)
+  /** Whether the rate-limit switch is in flight, for its own busy state. */
+  const [switching, setSwitching] = useState(false)
+  /** Why the last switch attempt failed, shown beside the limit. */
+  const [switchError, setSwitchError] = useState<string>()
   const inFlight = useRef(false)
   const refreshingRef = useRef(false)
   const mounted = useRef(false)
@@ -283,9 +406,75 @@ function ModelProbe({ model, card, t }: {
   // first read.
   const credit = creditFailed ? undefined : creditBadge(status, card, t)
 
+  // The limit that applies to *this* model, if any. Limits are per model, so a
+  // limit recorded for another model must not decorate this one.
+  const limit = rateLimitFor(status, model)
+
+  /**
+   * The other endpoint's counterpart for the current model, if there is one.
+   *
+   * The two variants publish overlapping model ids, and the user rotates between
+   * the same model on each — so the fallback is the same id under the sibling
+   * provider, and only when that provider actually offers it. Offering a switch
+   * to a model the other side does not serve would turn a rate limit into a
+   * "model not found" error.
+   */
+  const fallback = limit === undefined ? undefined : fallbackFor(card, model)
+
+  /**
+   * Move this session to the fallback model.
+   *
+   * Deliberately a *selection* change with no resend: the failed turn stays
+   * failed and the user decides whether to send again. Resending silently would
+   * answer the previous prompt from a different account than the one the user
+   * was watching, and would hide which account paid for it.
+   */
+  const switchAway = async (): Promise<void> => {
+    if (fallback === undefined || switching) return
+    setSwitching(true)
+    setSwitchError(undefined)
+    try {
+      const result = await sessions.selectModel({
+        sessionId,
+        provider: fallback.provider,
+        model: fallback.model,
+      })
+      if (!result.ok) {
+        throw new Error(result.error === undefined ? t('requestFailed') : `${result.error.code}: ${result.error.message}`)
+      }
+      // The seat is keyed by model, so the switch remounts this control against
+      // the new selection; a trailing read keeps the balance honest meanwhile.
+      await refresh().catch(() => { /* the seat re-reads on remount anyway */ })
+    } catch (error: unknown) {
+      if (mounted.current) setSwitchError(error instanceof Error ? error.message : t('requestFailed'))
+    } finally {
+      if (mounted.current) setSwitching(false)
+    }
+  }
+
   return (
     <span style={wrapperStyle}>
       {credit === undefined ? null : <span style={creditStyle}>{credit}</span>}
+
+      {limit === undefined ? null : (
+        <span style={limitStyle} title={limit.reason}>
+          {t('composerRateLimited', { time: formatResetTime(limit.resetAtMs) })}
+        </span>
+      )}
+
+      {fallback === undefined ? null : (
+        <button
+          type="button"
+          style={{ ...switchStyle, opacity: switching ? 0.6 : 1, cursor: switching ? 'default' : 'pointer' }}
+          title={switchError ?? t('composerRateLimitSwitch')}
+          aria-label={t('composerRateLimitSwitch')}
+          aria-busy={switching}
+          disabled={switching}
+          onClick={() => { void switchAway() }}
+        >
+          {t('composerRateLimitSwitchAction')}
+        </button>
+      )}
 
       <button
         type="button"

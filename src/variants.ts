@@ -60,6 +60,14 @@ export interface WorkBuddyVariant {
    * answer for the other's picker.
    */
   visibilityFilename: string
+  /**
+   * Basename of this variant's rate-limit file under `$DSH_HOME`.
+   *
+   * Split per variant for the same reason the visibility lists are: the two
+   * endpoints throttle independently, so one variant's recorded limit must never
+   * be read as the other's.
+   */
+  rateLimitFilename: string
   /** Same-origin status route consumed by this variant's card. */
   statusPath: string
   /** Same-origin probe-control route consumed by this variant's card. */
@@ -145,6 +153,7 @@ export const WORKBUDDY_VARIANTS: readonly WorkBuddyVariant[] = [
     ownFilename: '.workbuddy-auth.json',
     catalogFilename: '.workbuddy-catalog.json',
     visibilityFilename: '.workbuddy-model-visibility.json',
+    rateLimitFilename: '.workbuddy-ratelimit.json',
     statusPath: WORKBUDDY_STATUS_PATH,
     probePath: WORKBUDDY_PROBE_PATH,
     platform: 'workbuddy',
@@ -176,6 +185,7 @@ export const WORKBUDDY_VARIANTS: readonly WorkBuddyVariant[] = [
     ownFilename: '.workbuddy-ai-auth.json',
     catalogFilename: '.workbuddy-ai-catalog.json',
     visibilityFilename: '.workbuddy-ai-model-visibility.json',
+    rateLimitFilename: '.workbuddy-ai-ratelimit.json',
     statusPath: WORKBUDDY_AI_STATUS_PATH,
     probePath: WORKBUDDY_AI_PROBE_PATH,
     platform: 'workbuddy-ai',
