@@ -89,6 +89,17 @@ export default [
       // tsdown externalizes `peerDependencies` by default, so inlining these two
       // has to be asked for explicitly rather than by omission.
       neverBundle: ['@earendil-works/pi-ai'],
+      // ⚠️ `alwaysBundle` alone is NOT enough: tsdown only inlines a package it
+      // can actually RESOLVE. This plugin installs with `--prod`, so
+      // `@deepseek-ai/*` is absent from `node_modules` (that is the whole point
+      // — see the README) and the bundler silently leaves a bare `import` in
+      // lib/bin.js, which then dies at startup with ERR_MODULE_NOT_FOUND.
+      //
+      // Verified 2026-10-17: with node_modules/@deepseek-ai temporarily linked
+      // to the host's copy, lib/bin.js goes 184,290 -> 194,648 bytes and gains
+      // the inlined `withFileLock` implementation; without it the import stays
+      // external and `dsh plugin --profile web exec ... doctor` fails.
+      // Use `pnpm run build:cli`, which always establishes that link.
       alwaysBundle: ['@deepseek-ai/dsh-atomic-write', '@deepseek-ai/dsh-home-paths'],
     },
   },

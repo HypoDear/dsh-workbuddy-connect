@@ -22,7 +22,8 @@
   "scripts": {
     "prepack": "npm run build",
     "build": "tsdown",
-    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json"
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
+    "build:cli": "pwsh -NoProfile -File scripts/build-cli.ps1"
   },
   "exports": {
     ".": {
